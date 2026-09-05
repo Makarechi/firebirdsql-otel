@@ -133,9 +133,11 @@ func resultAttributes(r driver.Result) []attribute.KeyValue {
 	if r == nil {
 		return nil
 	}
-	n, err := r.RowsAffected()
-	if err != nil || n < 0 {
+	// This concrete database/sql type carries its count directly. Never probe an
+	// arbitrary Result: its RowsAffected method may be lazy or stateful.
+	n, ok := r.(driver.RowsAffected)
+	if !ok || n < 0 {
 		return nil
 	}
-	return []attribute.KeyValue{attribute.Int64("firebird.rows.affected", n)}
+	return []attribute.KeyValue{attribute.Int64("firebird.rows.affected", int64(n))}
 }
