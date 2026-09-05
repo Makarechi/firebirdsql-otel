@@ -24,7 +24,10 @@ type rowsState struct {
 	delivered, attempts int64
 	first               time.Duration
 	eof                 bool
-	closeErr            error
+	closeErr, nextErr   error
+	cancelDone          <-chan struct{}
+	cancelErr           <-chan error
+	stopCancel          func() bool
 }
 
 func (t *telemetry) queryResult(op operation, r driver.Rows, err error) (driver.Rows, error) {
@@ -38,10 +41,22 @@ func (t *telemetry) queryResult(op operation, r driver.Rows, err error) (driver.
 	if !t.c.Client.Rows || !op.enabled || !sc.IsValid() {
 		return r, nil
 	}
-	// Never retain the operation context (which may contain a request body or application state).
+	// Parentage retains only SpanContext. The stoppable cancellation subscription below
+	// lives only until Close and transfers the canonical cancellation error to minimal row state.
 	ctx := trace.ContextWithSpanContext(context.Background(), sc)
 	_, span := t.tracer.Start(ctx, op.d.Summary+" consumption", trace.WithSpanKind(trace.SpanKindInternal), trace.WithAttributes(attribute.String("firebird.source", "client"), attribute.String("firebird.correlation", "exact"), attribute.String("firebird.duration.kind", "consumption_lifetime")))
-	return wrapRows(&rowsState{raw: r, span: span, start: time.Now()}), nil
+	if !span.IsRecording() {
+		span.End()
+		return r, nil
+	}
+	state := &rowsState{raw: r, span: span, start: time.Now()}
+	if done := op.ctx.Done(); done != nil {
+		source := op.ctx
+		signal := make(chan error, 1)
+		state.cancelDone, state.cancelErr = done, signal
+		state.stopCancel = context.AfterFunc(source, func() { signal <- source.Err() })
+	}
+	return wrapRows(state), nil
 }
 func (r *rowsState) Columns() []string { return r.raw.Columns() }
 func (r *rowsState) Next(dest []driver.Value) error {
@@ -57,21 +72,51 @@ func (r *rowsState) Next(dest []driver.Value) error {
 	r.mu.Unlock()
 	if errors.Is(err, io.EOF) {
 		if n, ok := r.raw.(driver.RowsNextResultSet); !ok || !n.HasNextResultSet() {
-			r.finish("eof", nil)
+			r.mu.Lock()
+			r.eof = true
+			r.mu.Unlock()
 		}
 	} else if err != nil {
-		r.finish(outcome(err), err)
+		r.mu.Lock()
+		r.nextErr = err
+		r.mu.Unlock()
 	}
 	return err
 }
 func (r *rowsState) Close() error {
 	r.closeOnce.Do(func() {
 		r.closeErr = r.raw.Close()
-		kind := "early_close"
-		if r.closeErr != nil {
-			kind = outcome(r.closeErr)
+		// database/sql may supply a deferred error only from Close after Next returned EOF.
+		// Keep the original Close result for the caller; choose the observed telemetry outcome separately.
+		r.mu.Lock()
+		observed, eof := r.nextErr, r.eof
+		r.mu.Unlock()
+		if !eof && r.cancelDone != nil {
+			select {
+			case <-r.cancelDone:
+				// The AfterFunc may run after database/sql's cancellation-driven Close.
+				// Wait for its canonical Err signal instead of racing that callback.
+				if cancelled := <-r.cancelErr; observed == nil {
+					observed = cancelled
+				}
+			default:
+			}
 		}
-		r.finish(kind, r.closeErr)
+		if r.stopCancel != nil {
+			r.stopCancel()
+		}
+		r.stopCancel, r.cancelDone, r.cancelErr = nil, nil, nil
+		if observed == nil {
+			observed = r.closeErr
+		}
+		kind := "early_close"
+		if eof {
+			kind = "eof"
+		}
+		if observed != nil {
+			kind = outcome(observed)
+		}
+		r.finish(kind, observed)
 	})
 	return r.closeErr
 }
@@ -79,7 +124,6 @@ func (r *rowsState) finish(reason string, err error) {
 	r.once.Do(func() {
 		r.mu.Lock()
 		defer r.mu.Unlock()
-		r.eof = reason == "eof"
 		r.span.SetAttributes(attribute.Int64("firebird.rows.delivered", r.delivered), attribute.Int64("firebird.rows.next_attempts", r.attempts), attribute.Bool("firebird.rows.eof", r.eof), attribute.String("firebird.rows.outcome", reason), attribute.Float64("firebird.rows.consumption_seconds", time.Since(r.start).Seconds()))
 		if r.delivered > 0 {
 			r.span.SetAttributes(attribute.Float64("firebird.rows.first_delivery_seconds", r.first.Seconds()))
@@ -97,9 +141,13 @@ func (r *rowsState) HasNextResultSet() bool {
 func (r *rowsState) NextResultSet() error {
 	err := r.raw.(driver.RowsNextResultSet).NextResultSet()
 	if errors.Is(err, io.EOF) {
-		r.finish("eof", nil)
+		r.mu.Lock()
+		r.eof = true
+		r.mu.Unlock()
 	} else if err != nil {
-		r.finish(outcome(err), err)
+		r.mu.Lock()
+		r.nextErr = err
+		r.mu.Unlock()
 	}
 	return err
 }

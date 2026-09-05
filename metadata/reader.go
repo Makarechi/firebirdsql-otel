@@ -153,18 +153,19 @@ func (r *Reader) Read(ctx context.Context, root Object) (Graph, error) {
 			}
 			// RDB$PACKAGE_NAME qualifies the depended-on routine. Package bodies/headers
 			// are first-class object types; never merge same-named packaged and standalone routines.
-			to := Object{Name: strings.TrimSpace(name), Type: typ, Package: strings.TrimSpace(pkg.String)}
+			to := Object{Name: strings.TrimRight(name, " "), Type: typ, Package: strings.TrimRight(pkg.String, " ")}
 			if len(g.Edges) >= r.c.MaxNodes*4 || (!seen[to] && len(g.Nodes) >= r.c.MaxNodes) {
 				g.Truncated = true
 				break
 			}
-			g.Edges = append(g.Edges, Edge{From: current.o, To: to, Field: strings.TrimSpace(field.String)})
+			g.Edges = append(g.Edges, Edge{From: current.o, To: to, Field: strings.TrimRight(field.String, " ")})
 			if !seen[to] {
 				seen[to] = true
 				g.Nodes = append(g.Nodes, to)
 				next := to
 				// Packaged routine bodies are stored as dependencies of the package body.
 				if to.Package != "" && (to.Type == 5 || to.Type == 15) {
+					g.Scope = "package_body"
 					next = Object{Name: to.Package, Type: 19}
 					if !seen[next] {
 						if len(g.Nodes) >= r.c.MaxNodes {
