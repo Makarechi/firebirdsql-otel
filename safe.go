@@ -8,7 +8,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"reflect"
-	"strings"
 )
 
 // OpenWithConfig opts into safe instrumentation. The zero Config is safe_client.
@@ -106,7 +105,7 @@ func WrapConnector(connector driver.Connector, c Config) (driver.Connector, erro
 		if t.Kind() == reflect.Pointer {
 			t = t.Elem()
 		}
-		if strings.Contains(t.PkgPath(), "otelsql") {
+		if t.PkgPath() == "github.com/XSAM/otelsql" {
 			return nil, errors.New("firebirdotel: expected an uninstrumented driver")
 		}
 	}

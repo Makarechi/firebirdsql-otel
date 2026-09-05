@@ -3,6 +3,7 @@ package firebirdotel
 import (
 	"context"
 	"database/sql/driver"
+	"sync"
 )
 
 //go:generate python3 internal/generate/capabilities.py
@@ -12,8 +13,10 @@ type connBase interface {
 	Unwrap() driver.Conn
 }
 type connState struct {
-	raw driver.Conn
-	t   *telemetry
+	raw   driver.Conn
+	t     *telemetry
+	txMu  sync.Mutex
+	txCtx context.Context
 }
 
 func (c *connState) Unwrap() driver.Conn { return c.raw }
@@ -38,7 +41,7 @@ func (c *connState) prepare(ctx context.Context, q string, withCtx bool) (driver
 	if err != nil {
 		return nil, err
 	}
-	return wrapStmt(&stmtState{raw: s, t: c.t, d: d}), nil
+	return wrapStmt(&stmtState{raw: s, t: c.t, d: d, conn: c}), nil
 }
 func (c *connState) Begin() (driver.Tx, error) {
 	return c.begin(context.Background(), driver.TxOptions{}, false)
@@ -59,7 +62,10 @@ func (c *connState) begin(ctx context.Context, opts driver.TxOptions, withCtx bo
 	if err != nil {
 		return nil, err
 	}
-	return &txState{raw: tx, t: c.t, ctx: ctx}, nil
+	c.txMu.Lock()
+	c.txCtx = ctx
+	c.txMu.Unlock()
+	return &txState{raw: tx, t: c.t, ctx: context.WithoutCancel(ctx), conn: c}, nil
 }
 func (c *connState) Exec(q string, args []driver.Value) (driver.Result, error) {
 	op := c.t.start(context.Background(), "exec", c.t.describe(q))
@@ -76,12 +82,12 @@ func (c *connState) ExecContext(ctx context.Context, q string, args []driver.Nam
 func (c *connState) Query(q string, args []driver.Value) (driver.Rows, error) {
 	op := c.t.start(context.Background(), "query", c.t.describe(q))
 	r, err := c.raw.(driver.Queryer).Query(q, args)
-	return c.t.queryResult(op, r, err)
+	return c.t.queryResult(op, r, err, c.transactionContext())
 }
 func (c *connState) QueryContext(ctx context.Context, q string, args []driver.NamedValue) (driver.Rows, error) {
 	op := c.t.start(ctx, "query", c.t.describe(q))
 	r, err := c.raw.(driver.QueryerContext).QueryContext(ctx, q, args)
-	return c.t.queryResult(op, r, err)
+	return c.t.queryResult(op, r, err, c.transactionContext())
 }
 func (c *connState) Ping(ctx context.Context) error {
 	op := c.t.start(ctx, "ping", description{})
@@ -102,9 +108,10 @@ func (c *connState) CheckNamedValue(v *driver.NamedValue) error {
 
 type stmtBase interface{ driver.Stmt }
 type stmtState struct {
-	raw driver.Stmt
-	t   *telemetry
-	d   description
+	raw  driver.Stmt
+	t    *telemetry
+	d    description
+	conn *connState
 }
 
 func (s *stmtState) Close() error  { return s.raw.Close() }
@@ -124,12 +131,12 @@ func (s *stmtState) ExecContext(ctx context.Context, args []driver.NamedValue) (
 func (s *stmtState) Query(args []driver.Value) (driver.Rows, error) {
 	op := s.t.start(context.Background(), "query", s.d)
 	r, err := s.raw.Query(args)
-	return s.t.queryResult(op, r, err)
+	return s.t.queryResult(op, r, err, s.conn.transactionContext())
 }
 func (s *stmtState) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
 	op := s.t.start(ctx, "query", s.d)
 	r, err := s.raw.(driver.StmtQueryContext).QueryContext(ctx, args)
-	return s.t.queryResult(op, r, err)
+	return s.t.queryResult(op, r, err, s.conn.transactionContext())
 }
 func (s *stmtState) ColumnConverter(i int) driver.ValueConverter {
 	return s.raw.(driver.ColumnConverter).ColumnConverter(i)
@@ -139,20 +146,40 @@ func (s *stmtState) CheckNamedValue(v *driver.NamedValue) error {
 }
 
 type txState struct {
-	raw driver.Tx
-	t   *telemetry
-	ctx context.Context
+	raw  driver.Tx
+	t    *telemetry
+	ctx  context.Context
+	conn *connState
 }
 
 func (tx *txState) Commit() error {
+	defer tx.clearContext()
 	op := tx.t.start(tx.ctx, "commit", description{})
 	err := tx.raw.Commit()
 	tx.t.finish(op, err, nil)
 	return err
 }
 func (tx *txState) Rollback() error {
+	defer tx.clearContext()
 	op := tx.t.start(tx.ctx, "rollback", description{})
 	err := tx.raw.Rollback()
 	tx.t.finish(op, err, nil)
 	return err
+}
+
+func (c *connState) transactionContext() context.Context {
+	if c == nil {
+		return nil
+	}
+	c.txMu.Lock()
+	defer c.txMu.Unlock()
+	return c.txCtx
+}
+func (tx *txState) clearContext() {
+	if tx.conn != nil {
+		tx.conn.txMu.Lock()
+		tx.conn.txCtx = nil
+		tx.conn.txMu.Unlock()
+	}
+	tx.ctx = nil
 }
