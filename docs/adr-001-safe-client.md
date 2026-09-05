@@ -11,3 +11,12 @@ Optional database/sql interfaces must retain the underlying capability set. Gene
 Semantic keys are pinned to the database convention vocabulary shipped with OpenTelemetry Go 1.44.0 (semconv/v1.30.0 baseline): db.system.name, db.operation.name, db.query.summary, db.stored_procedure.name, db.collection.name, db.namespace and db.query.text. Safe mode emits this vocabulary regardless of otelsql's legacy environment switch; legacy constructors still follow otelsql.
 
 All readers and collectors are opt-in and independent of business queries. Metadata describes possible dependencies, MON$ describes scoped snapshots, Trace describes observed server events, and Profiler is a manually pinned diagnostic example. None is an inferred complete execution tree.
+
+Client SQL descriptions follow **client dialect 3**, which nakagami/firebirdsql v0.9.20
+sets explicitly during statement preparation. A database's stored dialect does not
+change that client setting. Custom drivers/connectors passed to the safe API must use
+client dialect 3 as well; this API does not negotiate or add dialect 1 support.
+Trace may contain SQL from unrelated clients. Without a known client dialect its
+parser must use AnalyzeUnknownDialect, omitting text, object summary and fingerprint
+when double-quoted tokens are ambiguous. Quotes inside removed literals/comments do
+not create ambiguity. Explicit routine identity fields remain schema metadata.

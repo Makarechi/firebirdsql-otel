@@ -22,7 +22,18 @@ type token struct {
 	identifier bool
 }
 
+// Analyze describes SQL submitted using client dialect 3. Double quotes denote identifiers.
 func Analyze(sql string, inputLimit, outputLimit int) Description {
+	return analyze(sql, inputLimit, outputLimit, true)
+}
+
+// AnalyzeUnknownDialect omits the entire description when double-quoted tokens
+// could be literals. Trace can contain SQL from other clients whose dialect is unknown.
+func AnalyzeUnknownDialect(sql string, inputLimit, outputLimit int) Description {
+	return analyze(sql, inputLimit, outputLimit, false)
+}
+
+func analyze(sql string, inputLimit, outputLimit int, quotedIdentifiers bool) Description {
 	d := Description{Operation: "SQL", Summary: "SQL"}
 	if inputLimit <= 0 || inputLimit > MaxInput {
 		inputLimit = MaxInput
@@ -36,6 +47,13 @@ func Analyze(sql string, inputLimit, outputLimit int) Description {
 	ts, ok := lex(sql)
 	if !ok || len(ts) == 0 {
 		return d
+	}
+	if !quotedIdentifiers {
+		for _, t := range ts {
+			if t.identifier && strings.HasPrefix(t.text, `"`) {
+				return d
+			}
+		}
 	}
 	parts := make([]string, len(ts))
 	for i, t := range ts {
