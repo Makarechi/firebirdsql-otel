@@ -98,6 +98,8 @@ forms are omitted conservatively. Attachment/transaction/statement IDs are parse
 only in the metadata header, before SQL begins; ID-like SQL literal content cannot
 change the correlation scope. Blank SQL lines are preserved. PLAN recognition starts
 only after the native post-SQL caret separator and outside SQL literals/comments.
+Table headings are accepted only after a performance record; embedded headers and
+table-shaped text inside SQL literals/comments remain sanitizer input.
 Unterminated SQL is held conservatively until a size bound or flush marks it incomplete.
 The trigger/relation ` FOR ` separator is recognized only outside quoted identifiers,
 including doubled-quote escapes.
@@ -111,7 +113,9 @@ Names and table identities are schema metadata, not secret argument values. Clie
 SQL, bind parameters, connection strings, user/process details and raw error lines
 are not forwarded. SQL record staging and lines are bounded at 64 KiB, SQL output
 at 4096 bytes, table summaries at 64, nesting at 64, active attachment/transaction
-scopes at 64, and the public queue at 1–256 events (64 by default).
+scopes at 64, and the public queue at 1–256 events (64 by default). Worker configuration
+input has a shared bound allowing six-byte JSON expansion of every accepted field;
+encoded overflow, trailing JSON and raw field-limit violations are rejected.
 
 The worker's WaitStrings channel is an **unbuffered raw transport handoff** imposed by
 the driver API. It exists only in the disposable worker; the public queue and IPC

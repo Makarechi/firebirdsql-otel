@@ -55,14 +55,16 @@ real Trace configuration with pattern metacharacters in the database name. Furth
 regressions cover single connector-factory invocation, untouched lazy results,
 connected typed package scopes, fully ordered bounded dependency reads, invisible
 MON$ targets, multiline SQL comments/literals/blank lines, forged headers in literals,
-and quoted trigger names containing ` FOR `.
+quoted trigger names containing ` FOR `, forged table headings in SQL comments,
+maximum JSON-expanded worker input, transaction cancellation with direct/prepared
+queries, cancellation-independent completion, one-shot result-set probes and custom
+driver package names containing `otelsql`.
 
 ## Measurement method
 
 Measurements below are a local reference, not a production capacity claim. Machine:
 Apple M4, macOS; Firebird 5.0.3 amd64 Docker image under emulation. All real-query
-rows were remeasured on September 6 with Go 1.25.0 after review corrections; the mock
-Exec reference uses Go 1.27.0. The real benchmark
+rows and mock Exec were remeasured on September 6 with Go 1.25.0 after review corrections. The real benchmark
 executes `SELECT N FROM OTEL_REPORT`, consumes its two rows to EOF, and uses a synchronous
 in-memory JSON span exporter. A local TCP proxy counts bytes and changes from response
 to request direction. These are **observed TCP turns**, not a wire-protocol packet
@@ -95,10 +97,10 @@ cannot compare complete Trace memory cost against in-process metadata/MON$ costs
 
 | Mode | ns/op range | B/op | allocs/op |
 | --- | ---: | ---: | ---: |
-| Plain driver | 111–114 | 80 | 2 |
-| Compatibility | 465–493 | 760 | 10 |
-| Safe | 1401–1496 | 3744 | 34 |
-| Diagnostic | 1447–1462 | 3744 | 34 |
+| Plain driver | 111–115 | 80 | 2 |
+| Compatibility | 451–471 | 760 | 10 |
+| Safe | 1291–1303 | 3680 | 33 |
+| Diagnostic | 1297–1310 | 3680 | 33 |
 
 Exec has no cursor, so the two Config profiles have the same allocation count here.
 For this small default query, use **48 allocations / 8192 bytes per operation** as a
@@ -109,10 +111,10 @@ CI assertion. Hard parser/cache/queue limits are enforced independently by tests
 
 | Mode | p50 µs | p95 µs | p99 µs | allocs/op | B/op | turns/op | spans/op | span JSON B/op |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Plain | 945 | 1498 | 2355 | 113.3 | 2559 | 4 | 0 | 0 |
-| Compatibility | 1291 | 1878 | 2316 | 164.4 | 8989 | 4 | 2 | 671 |
-| Safe | 1262 | 1641 | 2059 | 165.4 | 9461 | 4 | 1 | 730 |
-| Diagnostic | 1246 | 1450 | 1815 | 218.4 | 16023 | 4 | 2 | 1532 |
+| Plain | 811 | 1049 | 1355 | 113.2 | 2541 | 4 | 0 | 0 |
+| Compatibility | 820 | 996 | 1354 | 164.4 | 8997 | 4 | 2 | 671 |
+| Safe | 826 | 1013 | 1608 | 165.4 | 9460 | 4 | 1 | 730 |
+| Diagnostic | 822 | 945 | 1140 | 218.4 | 16067 | 4 | 2 | 1532 |
 
 All four modes used 168 client bytes and 304 server bytes per query. The measurements
 confirm no diagnostic SQL or hidden fetch in the client profiles for this workload.
@@ -121,26 +123,26 @@ evidence that instrumentation makes the database faster.
 
 | Mode | CPU user/system s | peak RSS MiB | final metric JSON B |
 | --- | ---: | ---: | ---: |
-| Plain | 0.06 / 0.21 | 16.6 | 365 |
-| Compatibility | 0.09 / 0.30 | 18.9 | 1864 |
-| Safe | 0.08 / 0.30 | 19.2 | 1632 |
-| Diagnostic | 0.08 / 0.29 | 19.4 | 1637 |
+| Plain | 0.06 / 0.16 | 16.7 | 365 |
+| Compatibility | 0.06 / 0.14 | 19.0 | 1857 |
+| Safe | 0.06 / 0.14 | 19.8 | 1639 |
+| Diagnostic | 0.07 / 0.14 | 20.2 | 1640 |
 
 ### Explicit diagnostics (200 iterations each, on top of safe client)
 
 | Addition | p50 µs | p95 µs | p99 µs | allocs/op | B/op | turns/op | diagnostic JSON B/op |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Cached metadata | 1125 | 1296 | 1346 | 170.0 | 12814 | 4.01 | 1650 |
-| Cold metadata | 7842 | 8840 | 11620 | 1182.6 | 63254 | 31.03 | 1650 |
-| MON$ snapshot | 5154 | 5553 | 7475 | 1343.0 | 63268 | 30.03 | 1795 |
-| Trace collector | 957 | 1505 | 2202 | 222.0 | 14617 | 44.06 | 1406 |
+| Cached metadata | 810 | 901 | 937 | 169.7 | 12745 | 4.01 | 1650 |
+| Cold metadata | 4798 | 5954 | 13795 | 1182.3 | 63263 | 31.03 | 1650 |
+| MON$ snapshot | 5128 | 5690 | 6379 | 1343.6 | 63442 | 30.03 | 1795 |
+| Trace collector | 1014 | 1809 | 2586 | 222.1 | 14631 | 44.06 | 1408 |
 
 | Addition | client/server B/op | CPU user/system s | peak RSS MiB | metric JSON B |
 | --- | ---: | ---: | ---: | ---: |
-| Cached metadata | 168 / 304 | 0.01 / 0.05 | 17.4 | 1637 |
-| Cold metadata | 3132 / 8393 | 0.10 / 0.30 | 20.0 | 1637 |
-| MON$ snapshot | 2712 / 9397 | 0.08 / 0.19 | 19.6 | 1638 |
-| Trace collector | 1453 / 3477 | 0.15 / 0.39 | 18.7 | 1638 |
+| Cached metadata | 168 / 304 | 0.01 / 0.03 | 17.2 | 1638 |
+| Cold metadata | 3132 / 8393 | 0.08 / 0.19 | 20.1 | 1637 |
+| MON$ snapshot | 2712 / 9397 | 0.08 / 0.19 | 19.8 | 1638 |
+| Trace collector | 1453 / 3477 | 0.16 / 0.45 | 18.7 | 1629 |
 
 Diagnostic traffic includes separate pool/control-session cleanup, hence fractional
 turns. Cached metadata is serialized each iteration; cold mode invalidates every time.

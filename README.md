@@ -46,8 +46,8 @@ and result consumption. The consumption span is an INTERNAL child of the query
 span. Its duration includes application pauses between reads; it is not Firebird
 engine execution time. Its aggregate counters distinguish rows delivered, Next
 attempts, EOF, early close and errors. No extra Next or SQL is performed. EOF records exhaustion, while final status also
-includes deferred Close errors. Query cancellation is mirrored until Close through a
-stoppable subscription, then released; cursor spans without recording return raw rows
+includes deferred Close errors. Query and transaction cancellation are mirrored until Close through
+stoppable subscriptions, then released; cursor spans without recording return raw rows
 and skip per-row bookkeeping. EOF from non-row operations is a connection error.
 
 `OpenWithDriverConfig` accepts an explicit `driver.Driver`, a DSN and Config; a
@@ -67,6 +67,8 @@ detect opaque wrappers.
 Inside a pinned `*sql.Conn`, use `firebirdotel.Raw(conn, callback)` to access the
 native connection. Do not retain it outside the callback. Optional driver, statement
 and column metadata interfaces are preserved exactly, including database/sql fallback.
+Next-result-set probes are forwarded once. Transaction completion telemetry retains
+context values and span parentage without retaining cancellation.
 
 ## Configuration and privacy
 
