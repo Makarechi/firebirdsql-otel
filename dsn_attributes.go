@@ -11,15 +11,8 @@ import (
 
 func connectionAttributes(dsn string, c ConnectionAttributes) []attribute.KeyValue {
 	a := []attribute.KeyValue{attribute.String("db.system.name", "firebirdsql")}
+	c = resolveConnection(dsn, c)
 	host, port := c.Host, c.Port
-	if c.ParseDSNNetwork && host == "" {
-		if h, p, ok := dsnNetwork(dsn); ok {
-			host = h
-			if port == 0 {
-				port = p
-			}
-		}
-	}
 	if host != "" {
 		a = append(a, attribute.String("server.address", host))
 		if port > 0 {
@@ -30,6 +23,21 @@ func connectionAttributes(dsn string, c ConnectionAttributes) []attribute.KeyVal
 		a = append(a, attribute.String("db.namespace", c.Namespace))
 	}
 	return a
+}
+
+// Explicit fields take precedence independently; ambiguous DSNs add nothing.
+func resolveConnection(dsn string, c ConnectionAttributes) ConnectionAttributes {
+	if c.ParseDSNNetwork && (c.Host == "" || c.Port == 0) {
+		if host, port, ok := dsnNetwork(dsn); ok {
+			if c.Host == "" {
+				c.Host = host
+			}
+			if c.Port == 0 {
+				c.Port = port
+			}
+		}
+	}
+	return c
 }
 func dsnNetwork(dsn string) (string, int, bool) {
 	if len(dsn) > 8192 {

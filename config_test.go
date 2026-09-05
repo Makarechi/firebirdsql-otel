@@ -68,3 +68,40 @@ func TestHintsRejectCommentSuffix(t *testing.T) {
 		}
 	}
 }
+func TestHintsRejectCommentsInsideName(t *testing.T) {
+	ctx := context.Background()
+	for _, s := range []string{"pkg/* SECRET */.proc", "/* SECRET */proc"} {
+		if WithOperationHint(ctx, OperationHint{Procedure: s}) != ctx {
+			t.Fatal("comment accepted", s)
+		}
+	}
+}
+func TestConnectionFieldPrecedence(t *testing.T) {
+	for _, tt := range []struct {
+		name, dsn   string
+		input, want ConnectionAttributes
+	}{
+		{"explicit host", "user:pass@db:3051/alias", ConnectionAttributes{Host: "alias", ParseDSNNetwork: true}, ConnectionAttributes{Host: "alias", Port: 3051, ParseDSNNetwork: true}},
+		{"explicit port", "user:pass@db:3051/alias", ConnectionAttributes{Port: 4000, ParseDSNNetwork: true}, ConnectionAttributes{Host: "db", Port: 4000, ParseDSNNetwork: true}},
+		{"both explicit", "user:pass@db:3051/alias", ConnectionAttributes{Host: "alias", Port: 4000, ParseDSNNetwork: true}, ConnectionAttributes{Host: "alias", Port: 4000, ParseDSNNetwork: true}},
+		{"default port", "user:pass@db/alias", ConnectionAttributes{Host: "alias", ParseDSNNetwork: true}, ConnectionAttributes{Host: "alias", Port: 3050, ParseDSNNetwork: true}},
+		{"ambiguous", "user:bad@secret@db:3051/alias", ConnectionAttributes{Host: "alias", ParseDSNNetwork: true}, ConnectionAttributes{Host: "alias", ParseDSNNetwork: true}},
+		{"disabled", "user:pass@db:3051/alias", ConnectionAttributes{Host: "alias"}, ConnectionAttributes{Host: "alias"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolveConnection(tt.dsn, tt.input); got != tt.want {
+				t.Fatalf("got %+v, want %+v", got, tt.want)
+			}
+			attrs := connectionAttributes(tt.dsn, tt.input)
+			port := 0
+			for _, a := range attrs {
+				if a.Key == "server.port" {
+					port = int(a.Value.AsInt64())
+				}
+			}
+			if port != tt.want.Port {
+				t.Fatalf("exported port %d, want %d", port, tt.want.Port)
+			}
+		})
+	}
+}

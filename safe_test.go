@@ -466,3 +466,23 @@ func TestOptionalRowsAndNextResultSet(t *testing.T) {
 		t.Fatal("cursor ended twice", count)
 	}
 }
+
+func TestOpenWithExplicitHostFillsDSNPort(t *testing.T) {
+	cfg, rec, _ := setupTelemetry(t, SafeConfig())
+	cfg.Connection = ConnectionAttributes{Host: "logical-host", ParseDSNNetwork: true}
+	db, err := OpenWithDriverConfig(registerMockDriver(t), "user:pass@db:3051/alias", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.ExecContext(t.Context(), `execute procedure "Quoted"(?)`, 1); err != nil {
+		t.Fatal(err)
+	}
+	spans := rec.Ended()
+	if len(spans) != 1 || spans[0].Name() != `EXECUTE PROCEDURE "Quoted"` {
+		t.Fatal("client dialect 3 name lost")
+	}
+	if !containsAttribute(spans[0].Attributes(), "server.address", "logical-host") || !containsAttribute(spans[0].Attributes(), "server.port", int64(3051)) {
+		t.Fatal("connection overrides not respected", spans[0].Attributes())
+	}
+}
