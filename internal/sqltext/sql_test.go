@@ -55,3 +55,22 @@ func FuzzAnalyze(f *testing.F) {
 		}
 	})
 }
+
+func TestUnknownDialectOmitsAmbiguousDescription(t *testing.T) {
+	for _, q := range []string{`select "SECRET_CANARY" from rdb$database`, `select * from "SECRET_CANARY"`, `execute procedure "SECRET_CANARY"(?)`, `PLAN ("SECRET_CANARY" NATURAL)`} {
+		d := AnalyzeUnknownDialect(q, 0, 0)
+		if d.Valid || d.Text != "" || d.Fingerprint != "" || d.Procedure != "" || d.Collection != "" || d.Summary != "SQL" {
+			t.Fatalf("ambiguous description exported: %+v", d)
+		}
+	}
+	for _, q := range []string{`select 'a"SECRET_CANARY' from rdb$database`, `select q'{"SECRET_CANARY"}' from rdb$database`, `select 1 /* "SECRET_CANARY" */ from rdb$database`} {
+		d := AnalyzeUnknownDialect(q, 0, 0)
+		if !d.Valid || strings.Contains(d.Text, "SECRET_CANARY") {
+			t.Fatalf("safe literals/comments mishandled: %+v", d)
+		}
+	}
+	d := Analyze(`execute procedure "Quoted"."Проц"(?)`, 0, 0)
+	if !d.Valid || d.Procedure != `"Quoted"."Проц"` {
+		t.Fatalf("dialect 3 identifiers lost: %+v", d)
+	}
+}
