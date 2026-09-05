@@ -12,9 +12,12 @@ import (
 )
 
 // OpenWithConfig opts into safe instrumentation. The zero Config is safe_client.
+// SQL descriptions use client dialect 3, as does the pinned Firebird driver.
 func OpenWithConfig(dsn string, c Config) (*sql.DB, error) {
 	return OpenWithDriverConfig(DriverName, dsn, c)
 }
+
+// OpenWithDriverConfig requires a driver that submits SQL using client dialect 3.
 func OpenWithDriverConfig(name, dsn string, c Config) (*sql.DB, error) {
 	c, err := normalizeConfig(c)
 	if err != nil {
@@ -38,12 +41,12 @@ func OpenWithDriverConfig(name, dsn string, c Config) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.SpanAttributes = append(connectionAttributes(dsn, c.Connection), c.SpanAttributes...)
-	c.Connection = ConnectionAttributes{}
+	c.Connection = resolveConnection(dsn, c.Connection)
 	return OpenDBWithConfig(connector, c)
 }
 
-// OpenDBWithConfig takes an uninstrumented connector. Call Raw to access native connections.
+// OpenDBWithConfig takes an uninstrumented, client-dialect-3 connector.
+// Call Raw to access native connections.
 func OpenDBWithConfig(connector driver.Connector, c Config) (*sql.DB, error) {
 	c, err := normalizeConfig(c)
 	if err != nil {
@@ -72,7 +75,8 @@ func compatibilityOptions(c Config) []Option {
 	return out
 }
 
-// WrapConnector preserves optional driver interfaces and does not create global registrations.
+// WrapConnector requires client dialect 3, preserves optional driver interfaces
+// and does not create global registrations.
 func WrapConnector(connector driver.Connector, c Config) (driver.Connector, error) {
 	c, err := normalizeConfig(c)
 	if err != nil {
