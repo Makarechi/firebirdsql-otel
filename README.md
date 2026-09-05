@@ -32,6 +32,10 @@ defer registration.Unregister() // before shutting down the providers
 _, err = db.ExecContext(ctx, "execute procedure BILL_UPDATE(?)", id)
 ```
 
+Safe client SQL descriptions use **client dialect 3**, which the pinned driver sets
+explicitly. Custom drivers/connectors supplied to the safe API must also use client
+dialect 3. Quoted object names are preserved; dialect 1 support is not added.
+
 The span is named `EXECUTE PROCEDURE BILL_UPDATE`. SQL and arguments sent to the
 database are unchanged. Bind values and error messages are never exported by this
 mode. `*firebirdsql.FbError` codes and safe error status are recorded on that SQL

@@ -195,9 +195,11 @@ func (p *Parser) consume(line string) []Event {
 		return nil
 	}
 	if strings.HasPrefix(trim, "PLAN (") {
-		d := sqltext.Analyze(trim, 0, 0)
+		d := sqltext.AnalyzeUnknownDialect(trim, 0, 0)
 		if d.Valid {
 			e.Plan = d.Text
+		} else {
+			e.Incomplete = true
 		}
 		p.collectSQL = false
 		return nil
@@ -274,7 +276,7 @@ func (p *Parser) finish() *Event {
 		if strings.Contains(raw, "...") {
 			e.Incomplete = true
 		} else {
-			d := sqltext.Analyze(raw, 0, 0)
+			d := sqltext.AnalyzeUnknownDialect(raw, 0, 0)
 			e.SQL = d.Text
 			if e.Kind == "statement" {
 				e.Name = d.Summary

@@ -76,3 +76,28 @@ func FuzzTraceChunks(f *testing.F) {
 		}
 	})
 }
+
+func TestUnknownDialectRedactsSQLAndSummary(t *testing.T) {
+	for _, q := range []string{`select "SECRET_CANARY" from rdb$database`, `select * from "SECRET_CANARY"`, `execute procedure "SECRET_CANARY"(?)`} {
+		p := New()
+		wire := record("EXECUTE_STATEMENT_START", "Statement 1:\n---\n"+q) + record("EXECUTE_STATEMENT_FINISH", "Statement 1:\n---\n"+q) + record("TRACE_FINI", "")
+		var events []Event
+		for i := 0; i < len(wire); i++ {
+			events = append(events, p.Feed(wire[i:i+1])...)
+		}
+		events = append(events, p.Flush()...)
+		if strings.Contains(fmt.Sprint(events), "SECRET_CANARY") {
+			t.Fatal("ambiguous SQL leaked", events)
+		}
+		for _, e := range events {
+			if e.Kind == "statement" && (e.SQL != "" || e.Name != "SQL" || !e.Incomplete) {
+				t.Fatal("ambiguous description retained", e)
+			}
+		}
+	}
+	p := New()
+	events := p.Feed(record("EXECUTE_STATEMENT_START", "Statement 1:\n---\nselect 1 from rdb$database\n\nPLAN (\"SECRET_CANARY\" NATURAL)") + record("TRACE_FINI", ""))
+	if len(events) != 1 || events[0].Plan != "" || !events[0].Incomplete || strings.Contains(fmt.Sprint(events), "SECRET_CANARY") {
+		t.Fatal("ambiguous plan retained", events)
+	}
+}

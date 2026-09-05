@@ -82,6 +82,11 @@ counters. Only a literal database path is accepted, not a general config or patt
 Statements are sanitized before IPC/event queuing. Procedure/function/trigger names,
 page counters and per-table counters are typed; tables are summaries, not timed spans.
 Classic PLAN lines are sanitized; other plan forms are omitted conservatively.
+Trace can include other applications, so its SQL client dialect is unknown. If the
+lexer sees double-quoted tokens outside removed literals/comments, the whole SQL
+text and object summary are omitted (generic SQL name), and the event is marked
+incomplete. The same conservative rule applies to PLAN text. This does not infer
+or add dialect 1 support, and does not alter explicit routine/table identity fields.
 
 Names and table identities are schema metadata, not secret argument values. Client
 SQL, bind parameters, connection strings, user/process details and raw error lines
