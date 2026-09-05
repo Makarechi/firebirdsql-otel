@@ -66,7 +66,7 @@ func New(db *sql.DB, maxRows int) (*Reader, error) {
 // Read always completes its own transaction. Successive calls obtain fresh MON$ snapshots.
 // No SQL text or explained plan BLOB is read into memory. Object identities are retained.
 func (r *Reader) Read(ctx context.Context, scope Scope) (Snapshot, error) {
-	out := Snapshot{Source: "monitoring", Correlation: "scoped", Scope: scope, CapturedAt: time.Now()}
+	out := Snapshot{Source: "monitoring", Correlation: "scoped", Scope: scope}
 	if scope.AttachmentID <= 0 || scope.StatementID < 0 {
 		return out, errors.New("monitoring: explicit attachment scope required")
 	}
@@ -94,6 +94,7 @@ func (r *Reader) Read(ctx context.Context, scope Scope) (Snapshot, error) {
 		args = append(args, scope.StatementID)
 	}
 	query := fmt.Sprintf(`SELECT FIRST %d S.MON$STATEMENT_ID,S.MON$ATTACHMENT_ID,S.MON$TRANSACTION_ID,S.MON$STATE,S.MON$COMPILED_STATEMENT_ID FROM MON$STATEMENTS S WHERE %s ORDER BY S.MON$STATEMENT_ID`, r.maxRows+1, where)
+	out.CapturedAt = time.Now() // The first MON$ query creates the transaction snapshot.
 	err = r.scan(ctx, tx, query, args, &out, func(rows *sql.Rows) error {
 		var x Statement
 		if err := rows.Scan(&x.ID, &x.AttachmentID, &x.TransactionID, &x.State, &x.CompiledID); err != nil {
@@ -112,8 +113,8 @@ func (r *Reader) Read(ctx context.Context, scope Scope) (Snapshot, error) {
 		if err := rows.Scan(&x.ID, &x.StatementID, &x.CallerID, &name, &pkg, &x.ObjectType, &x.Line, &x.Column); err != nil {
 			return err
 		}
-		x.Name = strings.TrimSpace(name.String)
-		x.Package = strings.TrimSpace(pkg.String)
+		x.Name = strings.TrimRight(name.String, " ")
+		x.Package = strings.TrimRight(pkg.String, " ")
 		out.Calls = append(out.Calls, x)
 		return nil
 	})
@@ -127,8 +128,8 @@ func (r *Reader) Read(ctx context.Context, scope Scope) (Snapshot, error) {
 		if err := rows.Scan(&x.ID, &name, &pkg, &x.ObjectType); err != nil {
 			return err
 		}
-		x.Name = strings.TrimSpace(name.String)
-		x.Package = strings.TrimSpace(pkg.String)
+		x.Name = strings.TrimRight(name.String, " ")
+		x.Package = strings.TrimRight(pkg.String, " ")
 		out.Compiled = append(out.Compiled, x)
 		return nil
 	})
@@ -147,7 +148,7 @@ func (r *Reader) Read(ctx context.Context, scope Scope) (Snapshot, error) {
 		if err := rows.Scan(&x.Table, &x.StatGroup, &x.SeqReads, &x.IndexReads, &x.Inserts, &x.Updates, &x.Deletes); err != nil {
 			return err
 		}
-		x.Table = strings.TrimSpace(x.Table)
+		x.Table = strings.TrimRight(x.Table, " ")
 		out.Tables = append(out.Tables, x)
 		return nil
 	})
