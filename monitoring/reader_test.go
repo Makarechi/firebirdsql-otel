@@ -13,6 +13,7 @@ func TestFreshScopedTransactionsAndLimits(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		mock.ExpectBegin()
 		mock.ExpectQuery("SELECT CURRENT_CONNECTION").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(99))
+		mock.ExpectQuery("SELECT MON\\$ATTACHMENT_ID FROM MON\\$ATTACHMENTS").WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(7))
 		mock.ExpectQuery("FROM MON\\$STATEMENTS S WHERE S.MON\\$ATTACHMENT_ID = \\? AND S.MON\\$STATEMENT_ID = \\?").WithArgs(7, 8).WillReturnRows(sqlmock.NewRows([]string{"id", "att", "tx", "state", "compiled"}).AddRow(8, 7, 1, 1, 2).AddRow(9, 7, 1, 1, 3))
 		mock.ExpectQuery("FROM MON\\$CALL_STACK").WithArgs(7, 8).WillReturnRows(sqlmock.NewRows([]string{"id", "stmt", "caller", "name", "pkg", "type", "line", "column"}))
 		mock.ExpectQuery("FROM MON\\$COMPILED_STATEMENTS").WithArgs(7, 8).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "pkg", "type"}))

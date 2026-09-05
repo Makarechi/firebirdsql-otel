@@ -14,24 +14,33 @@ import (
 // OpenWithConfig opts into safe instrumentation. The zero Config is safe_client.
 // SQL descriptions use client dialect 3, as does the pinned Firebird driver.
 func OpenWithConfig(dsn string, c Config) (*sql.DB, error) {
-	return OpenWithDriverConfig(DriverName, dsn, c)
+	normalized, err := normalizeConfig(c)
+	if err != nil {
+		return nil, err
+	}
+	if normalized.Profile == Compatibility {
+		return Open(dsn, compatibilityOptions(normalized)...)
+	}
+	// The pinned native driver has only Driver.Open, so this lookup constructs no connector.
+	raw, err := sql.Open(DriverName, dsn)
+	if err != nil {
+		return nil, err
+	}
+	native := raw.Driver()
+	_ = raw.Close()
+	return OpenWithDriverConfig(native, dsn, normalized)
 }
 
-// OpenWithDriverConfig requires a driver that submits SQL using client dialect 3.
-func OpenWithDriverConfig(name, dsn string, c Config) (*sql.DB, error) {
+// OpenWithDriverConfig accepts an explicit driver using client dialect 3.
+// DriverContext factories run exactly once; named compatibility APIs are unchanged.
+func OpenWithDriverConfig(d driver.Driver, dsn string, c Config) (*sql.DB, error) {
 	c, err := normalizeConfig(c)
 	if err != nil {
 		return nil, err
 	}
-	if c.Profile == Compatibility {
-		return OpenWithDriver(name, dsn, compatibilityOptions(c)...)
+	if d == nil {
+		return nil, errors.New("firebirdotel: nil driver")
 	}
-	raw, err := sql.Open(name, dsn)
-	if err != nil {
-		return nil, err
-	}
-	d := raw.Driver()
-	_ = raw.Close()
 	var connector driver.Connector
 	if dc, ok := d.(driver.DriverContext); ok {
 		connector, err = dc.OpenConnector(dsn)

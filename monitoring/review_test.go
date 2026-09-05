@@ -10,7 +10,7 @@ import (
 func TestSnapshotTimeExcludesPoolWaitAndPreservesNames(t *testing.T) {
 	var firstMON time.Time
 	matcher := sqlmock.QueryMatcherFunc(func(expected, actual string) error {
-		if strings.Contains(actual, "FROM MON$STATEMENTS") && firstMON.IsZero() {
+		if strings.Contains(actual, "FROM MON$ATTACHMENTS") && firstMON.IsZero() {
 			firstMON = time.Now()
 		}
 		return sqlmock.QueryMatcherRegexp.Match(expected, actual)
@@ -29,6 +29,7 @@ func TestSnapshotTimeExcludesPoolWaitAndPreservesNames(t *testing.T) {
 	reader, _ := New(db, 5)
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT CURRENT_CONNECTION").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(99))
+	mock.ExpectQuery("SELECT MON\\$ATTACHMENT_ID FROM MON\\$ATTACHMENTS").WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(7))
 	mock.ExpectQuery("FROM MON\\$STATEMENTS").WillReturnRows(sqlmock.NewRows([]string{"id", "att", "tx", "state", "compiled"}).AddRow(1, 7, 2, 1, 3))
 	mock.ExpectQuery("FROM MON\\$CALL_STACK").WillReturnRows(sqlmock.NewRows([]string{"id", "stmt", "caller", "name", "pkg", "type", "line", "column"}).AddRow(1, 1, nil, " PROC\t   ", " PKG  ", 5, 1, 1))
 	mock.ExpectQuery("FROM MON\\$COMPILED_STATEMENTS").WillReturnRows(sqlmock.NewRows([]string{"id", "name", "pkg", "type"}).AddRow(3, " COMPILED  ", " PKG  ", 5))
@@ -65,6 +66,26 @@ func TestSnapshotTimeExcludesPoolWaitAndPreservesNames(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("reader did not finish")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInvisibleTargetFailsInsteadOfReturningIdleSnapshot(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	r, _ := New(db, 5)
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT CURRENT_CONNECTION").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(99))
+	mock.ExpectQuery("SELECT MON\\$ATTACHMENT_ID FROM MON\\$ATTACHMENTS").WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectRollback()
+	s, err := r.Read(t.Context(), Scope{AttachmentID: 7})
+	if err != ErrTargetNotVisible || s.Correlation != "unmatched" {
+		t.Fatal("invisible target looked idle", s, err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

@@ -584,7 +584,7 @@ func TestSlowExporterPreservesExecutionAndError(t *testing.T) {
 func TestOpenWithExplicitHostFillsDSNPort(t *testing.T) {
 	cfg, rec, _ := setupTelemetry(t, SafeConfig())
 	cfg.Connection = ConnectionAttributes{Host: "logical-host", ParseDSNNetwork: true}
-	db, err := OpenWithDriverConfig(registerMockDriver(t), "user:pass@db:3051/alias", cfg)
+	db, err := OpenWithDriverConfig(mockDriver{}, "user:pass@db:3051/alias", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

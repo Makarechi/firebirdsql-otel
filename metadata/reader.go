@@ -19,6 +19,8 @@ type Object struct {
 type Edge struct {
 	From, To Object
 	Field    string
+	// Kind distinguishes catalog dependencies from conservative package-scope expansion.
+	Kind string
 }
 type Graph struct {
 	Source, Executed, Correlation, Scope string
@@ -123,6 +125,7 @@ func (r *Reader) Read(ctx context.Context, root Object) (Graph, error) {
 			g.Truncated = true
 			return g, nil
 		}
+		g.Edges = append(g.Edges, Edge{From: root, To: body, Kind: "package_body_scope"})
 	}
 	for len(queue) > 0 {
 		current := queue[0]
@@ -132,7 +135,7 @@ func (r *Reader) Read(ctx context.Context, root Object) (Graph, error) {
 			continue
 		}
 		// FIRST is a validated integer, not caller SQL. Fetch one sentinel for truncation.
-		query := fmt.Sprintf(`SELECT FIRST %d RDB$DEPENDED_ON_NAME, RDB$DEPENDED_ON_TYPE, RDB$FIELD_NAME, RDB$PACKAGE_NAME FROM RDB$DEPENDENCIES WHERE RDB$DEPENDENT_NAME = ? AND RDB$DEPENDENT_TYPE = ? ORDER BY RDB$DEPENDED_ON_TYPE, RDB$DEPENDED_ON_NAME`, r.c.MaxNodes+1)
+		query := fmt.Sprintf(`SELECT FIRST %d RDB$DEPENDED_ON_NAME, RDB$DEPENDED_ON_TYPE, RDB$FIELD_NAME, RDB$PACKAGE_NAME FROM RDB$DEPENDENCIES WHERE RDB$DEPENDENT_NAME = ? AND RDB$DEPENDENT_TYPE = ? ORDER BY RDB$DEPENDED_ON_TYPE, RDB$DEPENDED_ON_NAME, RDB$PACKAGE_NAME, RDB$FIELD_NAME`, r.c.MaxNodes+1)
 		rows, err := tx.QueryContext(ctx, query, current.o.Name, current.o.Type)
 		if err != nil {
 			return g, fmt.Errorf("metadata: read dependencies: %w", err)
@@ -158,7 +161,7 @@ func (r *Reader) Read(ctx context.Context, root Object) (Graph, error) {
 				g.Truncated = true
 				break
 			}
-			g.Edges = append(g.Edges, Edge{From: current.o, To: to, Field: strings.TrimRight(field.String, " ")})
+			g.Edges = append(g.Edges, Edge{From: current.o, To: to, Field: strings.TrimRight(field.String, " "), Kind: "dependency"})
 			if !seen[to] {
 				seen[to] = true
 				g.Nodes = append(g.Nodes, to)
@@ -167,6 +170,11 @@ func (r *Reader) Read(ctx context.Context, root Object) (Graph, error) {
 				if to.Package != "" && (to.Type == 5 || to.Type == 15) {
 					g.Scope = "package_body"
 					next = Object{Name: to.Package, Type: 19}
+					if len(g.Edges) >= r.c.MaxNodes*4 || (!seen[next] && len(g.Nodes) >= r.c.MaxNodes) {
+						g.Truncated = true
+						continue
+					}
+					g.Edges = append(g.Edges, Edge{From: to, To: next, Kind: "package_body_scope"})
 					if !seen[next] {
 						if len(g.Nodes) >= r.c.MaxNodes {
 							g.Truncated = true
