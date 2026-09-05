@@ -114,3 +114,8 @@ func WithOperationHint(ctx context.Context, h OperationHint) context.Context {
 	}
 	return context.WithValue(ctx, hintKey{}, h)
 }
+
+// CompatibilityConfig retains the original otelsql behavior, including its SQL/error policy.
+func CompatibilityConfig(options ...Option) Config {
+	return Config{Profile: Compatibility, OTelOptions: append([]Option(nil), options...)}
+}

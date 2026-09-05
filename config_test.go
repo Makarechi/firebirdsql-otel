@@ -59,3 +59,12 @@ func TestExplicitConnectionAndHints(t *testing.T) {
 		t.Fatal("missing hint")
 	}
 }
+
+func TestHintsRejectCommentSuffix(t *testing.T) {
+	ctx := context.Background()
+	for _, s := range []string{"P --SECRET_CANARY", "P/*SECRET_CANARY*/", "P 'SECRET_CANARY'"} {
+		if WithOperationHint(ctx, OperationHint{Procedure: s}) != ctx {
+			t.Fatal("SQL fragment accepted as hint", s)
+		}
+	}
+}

@@ -150,12 +150,15 @@ func objectName(ts []token, i int) (string, int) {
 
 // Identifier validates an explicit application hint; it is not a SQL fragment.
 func Identifier(s string) bool {
+	if len(s) == 0 || len(s) > 256 || !utf8.ValidString(s) {
+		return false
+	}
 	ts, ok := lex(s)
 	if !ok {
 		return false
 	}
 	n, end := objectName(ts, 0)
-	return n != "" && end == len(ts) && len(s) <= 256
+	return n != "" && end == len(ts) && len(s) <= 256 && strings.EqualFold(s, n)
 }
 func lex(s string) ([]token, bool) {
 	out := make([]token, 0, 32)
