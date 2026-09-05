@@ -33,7 +33,9 @@ environment setting; SQL/bind/DSN/error canaries; exact error identity and safe 
 filtered/unsampled parent isolation; prepared concurrency; ErrSkip fallback; Rows
 EOF/early close/error and multiple result sets; optional interfaces and Raw; pool
 metric unregister; bounded caches/cycles/invalidation; fresh, scoped MON$ transactions;
-Trace parsing, recursion, gaps, queue saturation and bounded process shutdown.
+Trace parsing, recursion, gaps, queue saturation and bounded process shutdown. Repeated pool opening/closing checks global registration
+and metric callback cleanup; a stalled synchronous exporter checks execution count,
+error identity and safe output after release.
 
 The real fixture includes nested and untaken procedure branches, functions, triggers,
 views, a selectable procedure, recursion, dynamic SQL and a package. Real client

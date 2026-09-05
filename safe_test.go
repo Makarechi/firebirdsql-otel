@@ -2,6 +2,7 @@ package firebirdotel
 
 import (
 	"context"
+	"database/sql"
 	"database/sql/driver"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/nakagami/firebirdsql"
 	"go.opentelemetry.io/otel/attribute"
@@ -464,5 +466,117 @@ func TestOptionalRowsAndNextResultSet(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatal("cursor ended twice", count)
+	}
+}
+
+func TestRepeatedPoolLifecycleAndAttributeBound(t *testing.T) {
+	cfg, rec, reader := setupTelemetry(t, SafeConfig())
+	cfg.Connection = ConnectionAttributes{Namespace: "billing", ParseDSNNetwork: true}
+	for i := 0; i < 32; i++ {
+		cfg.SpanAttributes = append(cfg.SpanAttributes, attribute.Int(fmt.Sprintf("custom.%d", i), i))
+	}
+	name := registerMockDriver(t)
+	registrations := len(sql.Drivers())
+	for i := 0; i < 20; i++ {
+		db, err := OpenWithDriverConfig(name, "user:"+canary+"@localhost:3051/private.fdb", cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		registration, err := RegisterDBStatsMetricsWithConfig(db, cfg)
+		if err != nil {
+			db.Close()
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(t.Context(), "execute procedure WORK(?)", 7); err != nil {
+			t.Fatal(err)
+		}
+		if err := registration.Unregister(); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if db.Stats().OpenConnections != 0 {
+			t.Fatal("pool connection retained")
+		}
+	}
+	if len(sql.Drivers()) != registrations {
+		t.Fatal("global driver registrations grew")
+	}
+	var data metricdata.ResourceMetrics
+	if err := reader.Collect(t.Context(), &data); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(fmt.Sprint(data), "db.sql.connection") {
+		t.Fatal("pool callback retained")
+	}
+	for _, span := range rec.Ended() {
+		if !containsAttribute(span.Attributes(), "server.address", "localhost") || !containsAttribute(span.Attributes(), "server.port", int64(3051)) || !containsAttribute(span.Attributes(), "db.namespace", "billing") || !containsAttribute(span.Attributes(), "custom.31", int64(31)) {
+			t.Fatal("connection or caller attributes lost")
+		}
+		if strings.Contains(fmt.Sprint(span.Attributes()), canary) {
+			t.Fatal("DSN leaked")
+		}
+	}
+}
+
+type blockedProcessor struct {
+	*tracetest.SpanRecorder
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (p *blockedProcessor) OnEnd(s sdktrace.ReadOnlySpan) {
+	select {
+	case p.entered <- struct{}{}:
+	default:
+	}
+	<-p.release
+	p.SpanRecorder.OnEnd(s)
+}
+func TestSlowExporterPreservesExecutionAndError(t *testing.T) {
+	p := &blockedProcessor{tracetest.NewSpanRecorder(), make(chan struct{}, 1), make(chan struct{})}
+	var release sync.Once
+	t.Cleanup(func() { release.Do(func() { close(p.release) }) })
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(p))
+	cfg := SafeConfig()
+	cfg.TracerProvider = tp
+	original := &firebirdsql.FbError{Message: canary, SQLCode: -803, SQLState: "23505"}
+	raw := &scriptConn{err: original}
+	db, err := OpenDBWithConfig(scriptConnector{raw}, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { _, err := db.ExecContext(t.Context(), "execute procedure WORK(?)", canary); done <- err }()
+	select {
+	case <-p.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("exporter was not reached")
+	}
+	raw.mu.Lock()
+	count := len(raw.queries)
+	raw.mu.Unlock()
+	if count != 1 {
+		t.Fatal("exporter changed database execution count")
+	}
+	release.Do(func() { close(p.release) })
+	select {
+	case err := <-done:
+		if err != original {
+			t.Fatal("error identity lost")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("operation did not finish after exporter release")
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := tp.Shutdown(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	spans := p.Ended()
+	if len(spans) != 1 || strings.Contains(fmt.Sprint(spans[0].Attributes(), spans[0].Status(), spans[0].Events()), canary) {
+		t.Fatal("unexpected or unsafe telemetry")
 	}
 }

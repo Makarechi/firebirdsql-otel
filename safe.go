@@ -38,8 +38,14 @@ func OpenWithDriverConfig(name, dsn string, c Config) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.SpanAttributes = append(connectionAttributes(dsn, c.Connection), c.SpanAttributes...)
-	c.Connection = ConnectionAttributes{}
+	if c.Connection.ParseDSNNetwork && c.Connection.Host == "" {
+		if host, port, ok := dsnNetwork(dsn); ok {
+			c.Connection.Host = host
+			if c.Connection.Port == 0 {
+				c.Connection.Port = port
+			}
+		}
+	}
 	return OpenDBWithConfig(connector, c)
 }
 
