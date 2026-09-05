@@ -101,3 +101,49 @@ func TestUnknownDialectRedactsSQLAndSummary(t *testing.T) {
 		t.Fatal("ambiguous plan retained", events)
 	}
 }
+
+func TestSQLCannotOverwriteTraceMetadata(t *testing.T) {
+	for _, sql := range []string{
+		"select '(ATT_12345,' as X, '(TRA_67890,' as Y from rdb$database",
+		"select '\n\t/db (ATT_12345, SECRET_CANARY)\n\t\t(TRA_67890, READ_WRITE)\nStatement 98765:\nProcedure SECRET_CANARY:\n' from rdb$database",
+	} {
+		p := New()
+		wire := record("EXECUTE_STATEMENT_START", "Statement 148:\n---\n"+sql) + record("EXECUTE_PROCEDURE_START", "Procedure WORK:") + record("EXECUTE_PROCEDURE_FINISH", "Procedure WORK:") + record("EXECUTE_STATEMENT_FINISH", "Statement 148:\n---\n"+sql) + record("TRACE_FINI", "")
+		var events []Event
+		for i := 0; i < len(wire); i += 3 {
+			end := i + 3
+			if end > len(wire) {
+				end = len(wire)
+			}
+			events = append(events, p.Feed(wire[i:end])...)
+		}
+		if len(events) != 4 {
+			t.Fatal("wrong records", events)
+		}
+		for _, e := range events {
+			if e.AttachmentID != 16 || e.TransactionID != 36 {
+				t.Fatal("SQL replaced metadata", e)
+			}
+			if e.Kind == "statement" && e.StatementID != 148 {
+				t.Fatal("SQL replaced statement ID", e)
+			}
+		}
+		if events[1].ParentSequence != events[0].Sequence || strings.Contains(fmt.Sprint(events), "SECRET_CANARY") || strings.Contains(fmt.Sprint(events), "12345") {
+			t.Fatal("SQL leaked or changed pairing", events)
+		}
+	}
+}
+func TestClassicPlanFamilies(t *testing.T) {
+	for _, plan := range []string{"PLAN (T NATURAL)", "PLAN JOIN (T NATURAL, U NATURAL)", "PLAN SORT (T NATURAL)", "PLAN HASH (T NATURAL, U NATURAL)", "PLAN MERGE (SORT (T NATURAL), SORT (U NATURAL))"} {
+		p := New()
+		events := p.Feed(record("EXECUTE_STATEMENT_START", "Statement 1:\n---\nselect 1 from T\n^^^^^^^^\n"+plan) + record("TRACE_FINI", ""))
+		if len(events) != 1 || events[0].Plan == "" || !strings.HasPrefix(events[0].Plan, strings.Split(plan, "(")[0]) {
+			t.Fatal("classic plan omitted", plan, events)
+		}
+	}
+	p := New()
+	events := p.Feed(record("EXECUTE_STATEMENT_START", "Statement 1:\n---\nselect 'PLAN JOIN (SECRET_CANARY)' from T") + record("TRACE_FINI", ""))
+	if len(events) != 1 || events[0].Plan != "" || strings.Contains(fmt.Sprint(events), "SECRET_CANARY") {
+		t.Fatal("SQL literal mistaken for plan", events)
+	}
+}

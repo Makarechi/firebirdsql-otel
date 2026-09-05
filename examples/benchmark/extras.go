@@ -133,3 +133,10 @@ func newExtras(ctx context.Context, mode, dsn string, business *sql.DB) (*extras
 	}
 	return e, nil
 }
+
+func restartTraceAfterWarmup(previous *extras, start func() (*extras, error)) (*extras, error) {
+	if err := previous.close(); err != nil {
+		return nil, err
+	}
+	return start()
+}

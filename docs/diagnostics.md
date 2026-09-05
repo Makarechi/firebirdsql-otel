@@ -20,7 +20,7 @@ after migrations; an in-flight old read cannot repopulate the new schema generat
 Errors are returned to the diagnostic caller; no business callback invokes this reader.
 
 `RDB$PACKAGE_NAME` qualifies the depended-on routine. Dependencies of packaged bodies
-are represented under object type 19 (package body). A packaged routine root explicitly
+are represented under object type 19 (package body). A packaged routine root, or traversal broadened from any dependency to a package body,
 returns `Scope=package_body`; this does not claim routine-level precision. Views,
 functions, triggers and other Firebird catalog object types stay distinct.
 
@@ -45,6 +45,10 @@ as a diagnostic connection. Each call owns and completes one transaction contain
 queries to MON$STATEMENTS, MON$CALL_STACK, MON$COMPILED_STATEMENTS, MON$TABLE_STATS and
 MON$RECORD_STATS. Compiled statement details cover the scoped top-level statements;
 the call stack separately describes sampled routines. SQL and plan BLOBs are not read.
+
+`CapturedAt` is taken immediately before the first MON$ query, after pool acquisition
+and transaction setup. Catalog and monitoring names lose only right-hand ASCII-space
+padding; leading whitespace and other characters remain part of the object identity.
 
 The snapshot is fixed from the first MON$ query through transaction completion, even
 at read committed isolation. A second Read uses a new transaction. Only this reader's
@@ -78,10 +82,15 @@ err = runtime.Wait(ctx)
 
 The worker uses the existing driver's NewTraceManager, StartWithName and WaitStrings.
 It requests start and finish events with time_threshold=0, plans and performance/table
-counters. Only a literal database path is accepted, not a general config or pattern.
+counters. Database paths are escaped as literal SIMILAR TO patterns and then encoded for the
+Trace configuration container. Wildcards, quantifiers and backslashes cannot broaden
+the selection. Control characters and embedded double quotes are rejected.
 Statements are sanitized before IPC/event queuing. Procedure/function/trigger names,
 page counters and per-table counters are typed; tables are summaries, not timed spans.
-Classic PLAN lines are sanitized; other plan forms are omitted conservatively.
+Classic PLAN lines (including JOIN, SORT, HASH and MERGE) are sanitized; other plan
+forms are omitted conservatively. Attachment/transaction/statement IDs are parsed
+only in the metadata header, before SQL begins; ID-like SQL literal content cannot
+change the correlation scope.
 Trace can include other applications, so its SQL client dialect is unknown. If the
 lexer sees double-quoted tokens outside removed literals/comments, the whole SQL
 text and object summary are omitted (generic SQL name), and the event is marked

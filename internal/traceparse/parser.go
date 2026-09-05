@@ -33,21 +33,22 @@ type frame struct {
 	statement  int64
 }
 type Parser struct {
-	line        string
-	skipLine    bool
-	current     *Event
-	sql         strings.Builder
-	collectSQL  bool
-	tableWidth  int
-	recordBytes int
-	sequence    uint64
-	stacks      map[[2]int64][]frame
-	incomplete  bool
+	line           string
+	skipLine       bool
+	current        *Event
+	sql            strings.Builder
+	collectSQL     bool
+	metadataHeader bool
+	tableWidth     int
+	recordBytes    int
+	sequence       uint64
+	stacks         map[[2]int64][]frame
+	incomplete     bool
 }
 
 var header = regexp.MustCompile(`^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d+) \([^\r\n]{1,100}\) ([A-Z_ ]{1,80})$`)
-var attachment = regexp.MustCompile(`\(ATT_([0-9]+),`)
-var transaction = regexp.MustCompile(`\(TRA_([0-9]+)[,)]`)
+var attachment = regexp.MustCompile(`^\t[^\r\n]+ \(ATT_([0-9]+), [^\r\n]*\)$`)
+var transaction = regexp.MustCompile(`^\t[ \t]*\(TRA_([0-9]+), [^\r\n]*\)$`)
 var statement = regexp.MustCompile(`^Statement ([0-9]+):$`)
 var perf = regexp.MustCompile(`([0-9]+) (ms|read\(s\)|fetch\(es\)|mark\(s\))`)
 
@@ -148,6 +149,7 @@ func (p *Parser) consume(line string) []Event {
 		p.current = &Event{Source: "trace", Correlation: "heuristic", Kind: kind, Phase: phase, Timestamp: m[1], Incomplete: p.incomplete}
 		p.recordBytes = 0
 		p.tableWidth = 0
+		p.metadataHeader = true
 		return out
 	}
 	if p.current == nil {
@@ -159,20 +161,22 @@ func (p *Parser) consume(line string) []Event {
 	}
 	trim := strings.TrimSpace(line)
 	e := p.current
-	if m := attachment.FindStringSubmatch(line); m != nil {
+	if m := attachment.FindStringSubmatch(line); p.metadataHeader && !p.collectSQL && e.AttachmentID == 0 && m != nil {
 		e.AttachmentID, _ = strconv.ParseInt(m[1], 10, 64)
 		return nil
 	}
-	if m := transaction.FindStringSubmatch(line); m != nil {
+	if m := transaction.FindStringSubmatch(line); p.metadataHeader && !p.collectSQL && e.AttachmentID != 0 && e.TransactionID == 0 && m != nil {
 		e.TransactionID, _ = strconv.ParseInt(m[1], 10, 64)
 		return nil
 	}
-	if m := statement.FindStringSubmatch(trim); m != nil {
+	if m := statement.FindStringSubmatch(trim); p.metadataHeader && e.Kind == "statement" && m != nil {
+		p.metadataHeader = false
 		e.StatementID, _ = strconv.ParseInt(m[1], 10, 64)
 		return nil
 	}
 	for _, label := range []string{"Procedure ", "Function ", "Trigger "} {
-		if strings.HasPrefix(trim, label) {
+		if p.metadataHeader && strings.HasPrefix(trim, label) && strings.EqualFold(strings.TrimSpace(label), e.Kind) {
+			p.metadataHeader = false
 			name := strings.TrimSuffix(strings.TrimPrefix(trim, label), ":")
 			if label == "Trigger " {
 				name = strings.SplitN(name, " FOR ", 2)[0]
@@ -188,13 +192,14 @@ func (p *Parser) consume(line string) []Event {
 	}
 	if strings.HasPrefix(trim, "---") {
 		p.collectSQL = true
+		p.metadataHeader = false
 		return nil
 	}
 	if trim == "" || strings.HasPrefix(trim, "^^^") {
 		p.collectSQL = false
 		return nil
 	}
-	if strings.HasPrefix(trim, "PLAN (") {
+	if !p.collectSQL && strings.HasPrefix(trim, "PLAN ") {
 		d := sqltext.AnalyzeUnknownDialect(trim, 0, 0)
 		if d.Valid {
 			e.Plan = d.Text

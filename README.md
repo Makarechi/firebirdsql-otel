@@ -45,7 +45,10 @@ Use `DiagnosticConfig()` to additionally observe connect, prepare, ping, reset
 and result consumption. The consumption span is an INTERNAL child of the query
 span. Its duration includes application pauses between reads; it is not Firebird
 engine execution time. Its aggregate counters distinguish rows delivered, Next
-attempts, EOF, early close and errors. No extra Next or SQL is performed.
+attempts, EOF, early close and errors. No extra Next or SQL is performed. EOF records exhaustion, while final status also
+includes deferred Close errors. Query cancellation is mirrored until Close through a
+stoppable subscription, then released; cursor spans without recording return raw rows
+and skip per-row bookkeeping. EOF from non-row operations is a connection error.
 
 `OpenDBWithConfig` accepts an uninstrumented `driver.Connector` and returns
 `(*sql.DB, error)`. `WrapConnector` is available for framework integration. Known

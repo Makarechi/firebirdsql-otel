@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/Makarechi/firebirdsql-otel/internal/traceparse"
 	"github.com/nakagami/firebirdsql"
@@ -19,9 +21,9 @@ func RunWorker(ctx context.Context, input io.Reader, output io.Writer) error {
 	if err := json.NewDecoder(io.LimitReader(input, 8192)).Decode(&cfg); err != nil {
 		return errors.New("trace: invalid worker input")
 	}
-	// A literal database path avoids trace config/regular expression injection.
-	if cfg.Database == "" || strings.ContainsAny(cfg.Database, "\r\n{}\"<>|*?[]()^$%") || strings.ContainsAny(cfg.Name, "\r\n") {
-		return errors.New("trace: database filter must be a literal path")
+	filter, err := databaseFilter(cfg.Database)
+	if err != nil || strings.ContainsAny(cfg.Name, "\r\n") {
+		return errors.New("trace: invalid database filter or session name")
 	}
 	serverConfig := fmt.Sprintf(`database = %s {
  enabled = true
@@ -40,7 +42,7 @@ func RunWorker(ctx context.Context, input io.Reader, output io.Writer) error {
  max_arg_length = 1
  max_arg_count = 1
 }
-`, cfg.Database)
+`, filter)
 	manager, err := firebirdsql.NewTraceManager(cfg.Address, cfg.User, cfg.Password, firebirdsql.GetDefaultServiceManagerOptions())
 	if err != nil {
 		return errors.New("trace: manager creation failed")
@@ -97,4 +99,24 @@ func RunWorker(ctx context.Context, input io.Reader, output io.Writer) error {
 			// Keep consuming until the blocked reader returns; the parent kills on its deadline.
 		}
 	}
+}
+
+// databaseFilter escapes the SIMILAR TO expression, then its trace-config container.
+// Firebird uses backslash for the regex escape and doubled braces in config values.
+func databaseFilter(path string) (string, error) {
+	if path == "" || len(path) > 1024 || !utf8.ValidString(path) {
+		return "", errors.New("trace: invalid database path")
+	}
+	var pattern strings.Builder
+	for _, r := range path {
+		if unicode.IsControl(r) || r == '"' {
+			return "", errors.New("trace: unsupported database path character")
+		}
+		if strings.ContainsRune(`[]()|^-+*%_?{}\`, r) {
+			pattern.WriteByte('\\')
+		}
+		pattern.WriteRune(r)
+	}
+	encoded := strings.NewReplacer("{", "{{", "}", "}}").Replace(pattern.String())
+	return `"` + encoded + `"`, nil
 }

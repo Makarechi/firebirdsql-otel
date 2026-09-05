@@ -193,6 +193,17 @@ func run() error {
 	if err := extra.wait(5); err != nil {
 		return err
 	}
+	warmupCount := 5
+	if *mode == "trace" {
+		// A procedure finish can precede buffered statement-finish records. Stop and
+		// fully drain the warm-up worker before opening a fresh measured stream.
+		extra, err = restartTraceAfterWarmup(extra, func() (*extras, error) { return newExtras(ctx, *mode, dsn, db) })
+		if err != nil {
+			return err
+		}
+		defer extra.close()
+		warmupCount = 0
+	}
 	extra.bytes.Store(0)
 	times := make([]int64, *n)
 	runtime.GC()
@@ -208,7 +219,7 @@ func run() error {
 		}
 		times[i] = time.Since(start).Nanoseconds()
 	}
-	if err := extra.wait(*n + 5); err != nil {
+	if err := extra.wait(*n + warmupCount); err != nil {
 		return err
 	}
 	if err := extra.close(); err != nil {
