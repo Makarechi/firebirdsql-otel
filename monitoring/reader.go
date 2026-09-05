@@ -10,6 +10,9 @@ import (
 	"time"
 )
 
+// ErrTargetNotVisible also covers targets that disconnected before the snapshot.
+var ErrTargetNotVisible = errors.New("monitoring: target attachment is absent or not visible")
+
 type Scope struct {
 	AttachmentID int64
 	StatementID  int64
@@ -94,7 +97,15 @@ func (r *Reader) Read(ctx context.Context, scope Scope) (Snapshot, error) {
 		args = append(args, scope.StatementID)
 	}
 	query := fmt.Sprintf(`SELECT FIRST %d S.MON$STATEMENT_ID,S.MON$ATTACHMENT_ID,S.MON$TRANSACTION_ID,S.MON$STATE,S.MON$COMPILED_STATEMENT_ID FROM MON$STATEMENTS S WHERE %s ORDER BY S.MON$STATEMENT_ID`, r.maxRows+1, where)
-	out.CapturedAt = time.Now() // The first MON$ query creates the transaction snapshot.
+	out.CapturedAt = time.Now() // This visibility query creates the MON$ snapshot.
+	var visible int64
+	if err := tx.QueryRowContext(ctx, `SELECT MON$ATTACHMENT_ID FROM MON$ATTACHMENTS WHERE MON$ATTACHMENT_ID = ?`, scope.AttachmentID).Scan(&visible); err != nil {
+		out.Correlation = "unmatched"
+		if errors.Is(err, sql.ErrNoRows) {
+			return out, ErrTargetNotVisible
+		}
+		return out, err
+	}
 	err = r.scan(ctx, tx, query, args, &out, func(rows *sql.Rows) error {
 		var x Statement
 		if err := rows.Scan(&x.ID, &x.AttachmentID, &x.TransactionID, &x.State, &x.CompiledID); err != nil {
