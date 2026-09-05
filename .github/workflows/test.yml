@@ -8,11 +8,34 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      firebird:
+        image: firebirdsql/firebird:5.0.3
+        env:
+          FIREBIRD_ROOT_PASSWORD: synthetic-test-only
+          FIREBIRD_DATABASE: otel.fdb
+        ports:
+          - 3050:3050
+        options: >-
+          --health-cmd "/opt/firebird/bin/isql -user SYSDBA -password synthetic-test-only localhost:/var/lib/firebird/data/otel.fdb -q -i /dev/null"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      FIREBIRD_TEST_DSN: SYSDBA:synthetic-test-only@localhost:3050/var/lib/firebird/data/otel.fdb
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
-      - run: go test ./...
+      - name: Install synthetic schema
+        run: docker exec -i ${{ job.services.firebird.id }} /opt/firebird/bin/isql -b -user SYSDBA -password synthetic-test-only /var/lib/firebird/data/otel.fdb < testdata/firebird5/schema.sql
+      - name: Build supervised Trace worker
+        run: |
+          go build -o "$RUNNER_TEMP/firebirdotel-trace" ./cmd/firebirdotel-trace
+          echo "FIREBIRD_TRACE_BINARY=$RUNNER_TEMP/firebirdotel-trace" >> "$GITHUB_ENV"
+      - run: go test -race ./...
       - run: go vet ./...
+      - run: go test ./internal/sqltext -run '^$' -fuzz FuzzAnalyze -fuzztime 5s -parallel 2
+      - run: go test ./internal/traceparse -run '^$' -fuzz FuzzTraceChunks -fuzztime 5s -parallel 2
