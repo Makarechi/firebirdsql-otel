@@ -40,7 +40,7 @@ func ErrorAttributes(err error) []attribute.KeyValue {
 }
 func outcome(err error) string {
 	switch {
-	case err == nil || errors.Is(err, io.EOF):
+	case err == nil:
 		return "ok"
 	case errors.Is(err, driver.ErrSkip):
 		return "fallback"
@@ -50,7 +50,7 @@ func outcome(err error) string {
 		return "deadline"
 	case errors.Is(err, ErrInstrumentation):
 		return "instrumentation"
-	case errors.Is(err, driver.ErrBadConn):
+	case errors.Is(err, driver.ErrBadConn), errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
 		return "connection"
 	case errors.Is(err, errors.ErrUnsupported):
 		return "unsupported"
