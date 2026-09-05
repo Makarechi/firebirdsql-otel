@@ -25,12 +25,16 @@ type rowsState struct {
 	first               time.Duration
 	eof                 bool
 	closeErr, nextErr   error
-	cancelDone          <-chan struct{}
-	cancelErr           <-chan error
-	stopCancel          func() bool
+	cancellations       [2]rowCancellation
 }
 
-func (t *telemetry) queryResult(op operation, r driver.Rows, err error) (driver.Rows, error) {
+type rowCancellation struct {
+	done <-chan struct{}
+	err  <-chan error
+	stop func() bool
+}
+
+func (t *telemetry) queryResult(op operation, r driver.Rows, err error, txContexts ...context.Context) (driver.Rows, error) {
 	sc := t.finish(op, err, nil)
 	if err != nil {
 		return r, err
@@ -50,12 +54,18 @@ func (t *telemetry) queryResult(op operation, r driver.Rows, err error) (driver.
 		return r, nil
 	}
 	state := &rowsState{raw: r, span: span, start: time.Now()}
-	if done := op.ctx.Done(); done != nil {
-		source := op.ctx
-		signal := make(chan error, 1)
-		state.cancelDone, state.cancelErr = done, signal
-		state.stopCancel = context.AfterFunc(source, func() { signal <- source.Err() })
+	sources := [2]context.Context{op.ctx, nil}
+	if len(txContexts) > 0 {
+		sources[1] = txContexts[0]
 	}
+	for i, source := range sources {
+		if source == nil || source.Done() == nil {
+			continue
+		}
+		signal := make(chan error, 1)
+		state.cancellations[i] = rowCancellation{source.Done(), signal, context.AfterFunc(source, func() { signal <- source.Err() })}
+	}
+
 	return wrapRows(state), nil
 }
 func (r *rowsState) Columns() []string { return r.raw.Columns() }
@@ -71,7 +81,7 @@ func (r *rowsState) Next(dest []driver.Value) error {
 	}
 	r.mu.Unlock()
 	if errors.Is(err, io.EOF) {
-		if n, ok := r.raw.(driver.RowsNextResultSet); !ok || !n.HasNextResultSet() {
+		if _, ok := r.raw.(driver.RowsNextResultSet); !ok {
 			r.mu.Lock()
 			r.eof = true
 			r.mu.Unlock()
@@ -91,21 +101,23 @@ func (r *rowsState) Close() error {
 		r.mu.Lock()
 		observed, eof := r.nextErr, r.eof
 		r.mu.Unlock()
-		if !eof && r.cancelDone != nil {
-			select {
-			case <-r.cancelDone:
-				// The AfterFunc may run after database/sql's cancellation-driven Close.
-				// Wait for its canonical Err signal instead of racing that callback.
-				if cancelled := <-r.cancelErr; observed == nil {
-					observed = cancelled
+		for i, cancellation := range r.cancellations {
+			if !eof && cancellation.done != nil {
+				select {
+				case <-cancellation.done:
+					// Wait for the canonical error if database/sql closed before AfterFunc ran.
+					if cancelled := <-cancellation.err; observed == nil {
+						observed = cancelled
+					}
+				default:
 				}
-			default:
 			}
+			if cancellation.stop != nil {
+				cancellation.stop()
+			}
+			r.cancellations[i] = rowCancellation{}
 		}
-		if r.stopCancel != nil {
-			r.stopCancel()
-		}
-		r.stopCancel, r.cancelDone, r.cancelErr = nil, nil, nil
+
 		if observed == nil {
 			observed = r.closeErr
 		}
@@ -136,7 +148,13 @@ func (r *rowsState) finish(reason string, err error) {
 	})
 }
 func (r *rowsState) HasNextResultSet() bool {
-	return r.raw.(driver.RowsNextResultSet).HasNextResultSet()
+	next := r.raw.(driver.RowsNextResultSet).HasNextResultSet()
+	if !next {
+		r.mu.Lock()
+		r.eof = true
+		r.mu.Unlock()
+	}
+	return next
 }
 func (r *rowsState) NextResultSet() error {
 	err := r.raw.(driver.RowsNextResultSet).NextResultSet()
