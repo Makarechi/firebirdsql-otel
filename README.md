@@ -50,6 +50,14 @@ includes deferred Close errors. Query cancellation is mirrored until Close throu
 stoppable subscription, then released; cursor spans without recording return raw rows
 and skip per-row bookkeeping. EOF from non-row operations is a connection error.
 
+`OpenWithDriverConfig` accepts an explicit `driver.Driver`, a DSN and Config; a
+`DriverContext` connector factory is called exactly once. The existing named-driver
+`OpenWithDriver` compatibility API is unchanged.
+
+Safe instrumentation never calls arbitrary `driver.Result` methods to collect
+telemetry. A rows-affected attribute is available only for a concrete cached
+`driver.RowsAffected` value; other result implementations are returned untouched.
+
 `OpenDBWithConfig` accepts an uninstrumented `driver.Connector` and returns
 `(*sql.DB, error)`. `WrapConnector` is available for framework integration. Known
 safe/otelsql wrappers are rejected to prevent double instrumentation. Arbitrary

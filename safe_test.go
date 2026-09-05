@@ -475,10 +475,10 @@ func TestRepeatedPoolLifecycleAndAttributeBound(t *testing.T) {
 	for i := 0; i < 32; i++ {
 		cfg.SpanAttributes = append(cfg.SpanAttributes, attribute.Int(fmt.Sprintf("custom.%d", i), i))
 	}
-	name := registerMockDriver(t)
+	registerMockDriver(t)
 	registrations := len(sql.Drivers())
 	for i := 0; i < 20; i++ {
-		db, err := OpenWithDriverConfig(name, "user:"+canary+"@localhost:3051/private.fdb", cfg)
+		db, err := OpenWithDriverConfig(mockDriver{}, "user:"+canary+"@localhost:3051/private.fdb", cfg)
 		if err != nil {
 			t.Fatal(err)
 		}

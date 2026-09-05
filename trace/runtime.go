@@ -27,6 +27,10 @@ type Config struct {
 	Name   string
 	Buffer int
 }
+
+// JSON may expand each byte to six characters; include framing/key overhead.
+const maxWorkerConfig = 6*(512+256+4096+1024+128) + 128
+
 type workerConfig struct{ Address, User, Password, Database, Name string }
 type Runtime struct {
 	events chan Event
@@ -50,7 +54,7 @@ func Start(ctx context.Context, c Config) (*Runtime, error) {
 		return nil, errors.New("trace: invalid queue bound")
 	}
 	data, err := json.Marshal(workerConfig{c.Address, c.User, c.Password, c.Database, c.Name})
-	if err != nil {
+	if err != nil || len(data) > maxWorkerConfig {
 		return nil, errors.New("trace: encode configuration failed")
 	}
 	runCtx, cancel := context.WithCancel(ctx)

@@ -355,3 +355,13 @@ func lex(s string) ([]token, bool) {
 	}
 	return out, depth == 0
 }
+
+// LexicallyComplete reports whether a bounded SQL fragment has closed literals,
+// comments and delimiters. It is a framing aid, not full SQL syntax validation.
+func LexicallyComplete(s string) bool {
+	if len(s) > MaxInput || !utf8.ValidString(s) {
+		return false
+	}
+	ts, ok := lex(s)
+	return ok && len(ts) > 0
+}

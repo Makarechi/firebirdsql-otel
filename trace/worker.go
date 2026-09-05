@@ -17,9 +17,9 @@ import (
 // RunWorker is the isolated helper entry point, not an in-process production collector.
 // The driver lacks cancellable startup/read/stop guarantees. The parent must supervise this process.
 func RunWorker(ctx context.Context, input io.Reader, output io.Writer) error {
-	var cfg workerConfig
-	if err := json.NewDecoder(io.LimitReader(input, 8192)).Decode(&cfg); err != nil {
-		return errors.New("trace: invalid worker input")
+	cfg, err := decodeWorkerConfig(input)
+	if err != nil {
+		return err
 	}
 	filter, err := databaseFilter(cfg.Database)
 	if err != nil || strings.ContainsAny(cfg.Name, "\r\n") {
@@ -119,4 +119,16 @@ func databaseFilter(path string) (string, error) {
 	}
 	encoded := strings.NewReplacer("{", "{{", "}", "}}").Replace(pattern.String())
 	return `"` + encoded + `"`, nil
+}
+
+func decodeWorkerConfig(input io.Reader) (workerConfig, error) {
+	var cfg workerConfig
+	data, err := io.ReadAll(io.LimitReader(input, maxWorkerConfig+1))
+	if err != nil || len(data) > maxWorkerConfig || json.Unmarshal(data, &cfg) != nil {
+		return cfg, errors.New("trace: invalid worker input")
+	}
+	if len(cfg.Address) > 512 || len(cfg.User) > 256 || len(cfg.Password) > 4096 || len(cfg.Database) > 1024 || len(cfg.Name) > 128 {
+		return workerConfig{}, errors.New("trace: configuration limits exceeded")
+	}
+	return cfg, nil
 }

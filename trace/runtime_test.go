@@ -122,3 +122,20 @@ func TestFirebird5Trace(t *testing.T) {
 	}
 	t.Log("observed actual outer, nested procedure, function and trigger finishes")
 }
+
+func TestEncodedWorkerConfigurationBound(t *testing.T) {
+	want := workerConfig{strings.Repeat("<", 512), strings.Repeat(">", 256), strings.Repeat("&", 4096), strings.Repeat("<", 1024), strings.Repeat(">", 128)}
+	data, err := json.Marshal(want)
+	if err != nil || len(data) <= 8192 {
+		t.Fatal("fixture must exceed previous encoded limit", err)
+	}
+	got, err := decodeWorkerConfig(strings.NewReader(string(data)))
+	if err != nil || got != want {
+		t.Fatal("accepted raw fields did not round trip", err)
+	}
+	for _, bad := range []string{strings.Repeat(" ", maxWorkerConfig+1), string(data) + "{}", `{"Password":"` + strings.Repeat("x", 4097) + `"}`} {
+		if _, err := decodeWorkerConfig(strings.NewReader(bad)); err == nil {
+			t.Fatal("accepted oversized or trailing input")
+		}
+	}
+}

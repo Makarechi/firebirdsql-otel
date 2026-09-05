@@ -23,6 +23,10 @@ Errors are returned to the diagnostic caller; no business callback invokes this 
 are represented under object type 19 (package body). A packaged routine root, or traversal broadened from any dependency to a package body,
 returns `Scope=package_body`; this does not claim routine-level precision. Views,
 functions, triggers and other Firebird catalog object types stay distinct.
+A typed `package_body_scope` edge connects each broadened member to its package body;
+catalog edges have kind `dependency`. This keeps a packaged root connected without
+claiming that package-wide dependencies belong to that individual routine. Bounded
+reads order by type, name, package and field before applying the row limit.
 
 All graphs say `source=metadata`, `executed=unknown`, `correlation=unmatched`.
 Untaken IF branches can be present; dynamic EXECUTE STATEMENT targets can be absent.
@@ -42,7 +46,7 @@ snapshot, err := reader.Read(ctx, monitoring.Scope{
 
 A nonzero attachment is mandatory. The reader rejects the target attachment itself
 as a diagnostic connection. Each call owns and completes one transaction containing
-queries to MON$STATEMENTS, MON$CALL_STACK, MON$COMPILED_STATEMENTS, MON$TABLE_STATS and
+a visibility query to MON$ATTACHMENTS followed by queries to MON$STATEMENTS, MON$CALL_STACK, MON$COMPILED_STATEMENTS, MON$TABLE_STATS and
 MON$RECORD_STATS. Compiled statement details cover the scoped top-level statements;
 the call stack separately describes sampled routines. SQL and plan BLOBs are not read.
 
@@ -60,7 +64,9 @@ The live integration test verified that catalog reads do not leave that setting 
 Results say `source=monitoring`, `correlation=scoped`, and carry the requested scope.
 Attachment table counters aggregate concurrent statements. No per-query attribution
 is inferred from their deltas. Short calls may be missed, and an empty result does not
-prove inactivity: permissions may limit visibility. Object/attachment identifiers are
+prove inactivity. An absent or invisible target attachment returns
+`ErrTargetNotVisible` with unmatched correlation instead of a successful empty
+snapshot; the reader cannot distinguish disconnection from insufficient permissions. Object/attachment identifiers are
 not metric dimensions. Each collection has a bounded row count and a truncation flag.
 
 ## Experimental Trace collector
@@ -90,7 +96,11 @@ page counters and per-table counters are typed; tables are summaries, not timed 
 Classic PLAN lines (including JOIN, SORT, HASH and MERGE) are sanitized; other plan
 forms are omitted conservatively. Attachment/transaction/statement IDs are parsed
 only in the metadata header, before SQL begins; ID-like SQL literal content cannot
-change the correlation scope.
+change the correlation scope. Blank SQL lines are preserved. PLAN recognition starts
+only after the native post-SQL caret separator and outside SQL literals/comments.
+Unterminated SQL is held conservatively until a size bound or flush marks it incomplete.
+The trigger/relation ` FOR ` separator is recognized only outside quoted identifiers,
+including doubled-quote escapes.
 Trace can include other applications, so its SQL client dialect is unknown. If the
 lexer sees double-quoted tokens outside removed literals/comments, the whole SQL
 text and object summary are omitted (generic SQL name), and the event is marked

@@ -33,17 +33,19 @@ type frame struct {
 	statement  int64
 }
 type Parser struct {
-	line           string
-	skipLine       bool
-	current        *Event
-	sql            strings.Builder
-	collectSQL     bool
-	metadataHeader bool
-	tableWidth     int
-	recordBytes    int
-	sequence       uint64
-	stacks         map[[2]int64][]frame
-	incomplete     bool
+	line               string
+	skipLine           bool
+	current            *Event
+	sql                strings.Builder
+	collectSQL         bool
+	metadataHeader     bool
+	planSection        bool
+	performanceSection bool
+	tableWidth         int
+	recordBytes        int
+	sequence           uint64
+	stacks             map[[2]int64][]frame
+	incomplete         bool
 }
 
 var header = regexp.MustCompile(`^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d+) \([^\r\n]{1,100}\) ([A-Z_ ]{1,80})$`)
@@ -108,6 +110,21 @@ func (p *Parser) Flush() []Event {
 	return out
 }
 func (p *Parser) consume(line string) []Event {
+	if p.collectSQL {
+		trim := strings.TrimSpace(line)
+		boundary := header.MatchString(line) || strings.HasPrefix(trim, "^^^") || strings.HasPrefix(trim, "param") || strings.Contains(trim, "records fetched") || (len(trim) > 0 && trim[0] >= '0' && trim[0] <= '9' && perf.MatchString(trim))
+		if !boundary || !sqltext.LexicallyComplete(p.sql.String()) {
+			p.recordBytes += len(line) + 1
+			if p.recordBytes > MaxRecord || p.sql.Len()+len(line)+1 > MaxRecord {
+				return []Event{p.Gap()}
+			}
+			p.sql.WriteString(line)
+			p.sql.WriteByte('\n')
+			return nil
+		}
+		p.collectSQL = false
+	}
+
 	if m := header.FindStringSubmatch(line); m != nil {
 		out := []Event{}
 		if e := p.finish(); e != nil {
@@ -150,12 +167,14 @@ func (p *Parser) consume(line string) []Event {
 		p.recordBytes = 0
 		p.tableWidth = 0
 		p.metadataHeader = true
+		p.planSection = false
+		p.performanceSection = false
 		return out
 	}
 	if p.current == nil {
 		return nil
 	}
-	p.recordBytes += len(line)
+	p.recordBytes += len(line) + 1
 	if p.recordBytes > MaxRecord {
 		return []Event{p.Gap()}
 	}
@@ -179,7 +198,7 @@ func (p *Parser) consume(line string) []Event {
 			p.metadataHeader = false
 			name := strings.TrimSuffix(strings.TrimPrefix(trim, label), ":")
 			if label == "Trigger " {
-				name = strings.SplitN(name, " FOR ", 2)[0]
+				name = triggerName(name)
 			}
 			if sqltext.Identifier(name) {
 				e.Name = name
@@ -195,11 +214,15 @@ func (p *Parser) consume(line string) []Event {
 		p.metadataHeader = false
 		return nil
 	}
-	if trim == "" || strings.HasPrefix(trim, "^^^") {
+	if strings.HasPrefix(trim, "^^^") {
+		p.planSection = true
+		return nil
+	}
+	if trim == "" {
 		p.collectSQL = false
 		return nil
 	}
-	if !p.collectSQL && strings.HasPrefix(trim, "PLAN ") {
+	if p.planSection && strings.HasPrefix(trim, "PLAN ") {
 		d := sqltext.AnalyzeUnknownDialect(trim, 0, 0)
 		if d.Valid {
 			e.Plan = d.Text
@@ -209,7 +232,7 @@ func (p *Parser) consume(line string) []Event {
 		p.collectSQL = false
 		return nil
 	}
-	if strings.HasPrefix(line, "Table") && strings.Contains(line, "   Natural     Index") {
+	if p.performanceSection && strings.HasPrefix(line, "Table") && strings.Contains(line, "   Natural     Index") {
 		p.tableWidth = strings.Index(line, "   Natural")
 		p.collectSQL = false
 		return nil
@@ -245,6 +268,7 @@ func (p *Parser) consume(line string) []Event {
 	}
 	matches := perf.FindAllStringSubmatch(trim, -1)
 	if len(matches) > 0 && trim[0] >= '0' && trim[0] <= '9' {
+		p.performanceSection = true
 		for _, m := range matches {
 			v, _ := strconv.ParseInt(m[1], 10, 64)
 			switch strings.TrimSpace(m[2]) {
@@ -341,4 +365,21 @@ func (p *Parser) finish() *Event {
 	}
 	e.Incomplete = e.Incomplete || p.incomplete
 	return e
+}
+
+// The relation separator is syntax only outside a quoted trigger identifier.
+func triggerName(s string) string {
+	quoted := false
+	for i := 0; i < len(s); i++ {
+		if s[i] == '"' {
+			if quoted && i+1 < len(s) && s[i+1] == '"' {
+				i++
+				continue
+			}
+			quoted = !quoted
+		} else if !quoted && strings.HasPrefix(s[i:], " FOR ") {
+			return s[:i]
+		}
+	}
+	return s
 }

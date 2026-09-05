@@ -58,6 +58,7 @@ func TestRecursionAndTruncation(t *testing.T) {
 	}
 	p = New()
 	events = p.Feed(record("EXECUTE_STATEMENT_START", "Statement 1:\n---\nselect 'SECRET...") + record("TRACE_FINI", ""))
+	events = append(events, p.Flush()...)
 	if events[0].SQL != "" || !events[0].Incomplete {
 		t.Fatal(events)
 	}
@@ -96,7 +97,7 @@ func TestUnknownDialectRedactsSQLAndSummary(t *testing.T) {
 		}
 	}
 	p := New()
-	events := p.Feed(record("EXECUTE_STATEMENT_START", "Statement 1:\n---\nselect 1 from rdb$database\n\nPLAN (\"SECRET_CANARY\" NATURAL)") + record("TRACE_FINI", ""))
+	events := p.Feed(record("EXECUTE_STATEMENT_START", "Statement 1:\n---\nselect 1 from rdb$database\n^^^^^^^^\nPLAN (\"SECRET_CANARY\" NATURAL)") + record("TRACE_FINI", ""))
 	if len(events) != 1 || events[0].Plan != "" || !events[0].Incomplete || strings.Contains(fmt.Sprint(events), "SECRET_CANARY") {
 		t.Fatal("ambiguous plan retained", events)
 	}
@@ -145,5 +146,35 @@ func TestClassicPlanFamilies(t *testing.T) {
 	events := p.Feed(record("EXECUTE_STATEMENT_START", "Statement 1:\n---\nselect 'PLAN JOIN (SECRET_CANARY)' from T") + record("TRACE_FINI", ""))
 	if len(events) != 1 || events[0].Plan != "" || strings.Contains(fmt.Sprint(events), "SECRET_CANARY") {
 		t.Fatal("SQL literal mistaken for plan", events)
+	}
+}
+
+func TestMultilineSQLCommentsAndBlankLines(t *testing.T) {
+	cases := []string{
+		"SELECT /*\n2026-09-05T20:11:08.5030 (29:0x1) EXECUTE_PROCEDURE_START\nProcedure SECRET_CANARY:\n*/ 1 FROM RDB$DATABASE",
+		"SELECT /*\nTable                              Natural     Index    Update    Insert    Delete   Backout     Purge   Expunge\n" + fmt.Sprintf("%-32s%10d%10d%10d%10d%10d%10d%10d%10d", "SECRET_CANARY", 1, 2, 3, 4, 5, 6, 7, 8) + "\n*/ 1 FROM RDB$DATABASE",
+		"SELECT\n\n1 FROM RDB$DATABASE",
+		"SELECT /*\n\nPLAN (SECRET_CANARY)\n*/ 1 FROM RDB$DATABASE",
+		"SELECT 'first\n\nPLAN (SECRET_CANARY)\nlast' FROM RDB$DATABASE",
+		"SELECT 'first\n2026-09-05T20:11:08.5030 (29:0x1) EXECUTE_STATEMENT_START\n\t/db (ATT_12345, SECRET_CANARY)\nlast' FROM RDB$DATABASE",
+	}
+	for _, q := range cases {
+		p := New()
+		events := p.Feed(record("EXECUTE_STATEMENT_START", "Statement 148:\n---\n"+q+"\n^^^^^^^^\nPLAN (RDB$DATABASE NATURAL)") + record("TRACE_FINI", ""))
+		if len(events) != 1 || events[0].Name != "SELECT RDB$DATABASE" || events[0].StatementID != 148 || events[0].AttachmentID != 16 || events[0].SQL == "SELECT" || strings.Contains(fmt.Sprint(events), "SECRET_CANARY") {
+			t.Fatal("incorrect SQL framing", events)
+		}
+		if events[0].Plan != "PLAN ( RDB$DATABASE NATURAL )" {
+			t.Fatal("comment became plan", events)
+		}
+	}
+}
+func TestQuotedTriggerRelationSeparator(t *testing.T) {
+	for _, name := range []string{`"AUDIT FOR USERS"`, `"AUDIT "" FOR "" USERS"`, `"Проверка FOR users"`} {
+		p := New()
+		events := p.Feed(record("EXECUTE_TRIGGER_START", "Trigger "+name+" FOR USERS (BEFORE UPDATE):") + record("EXECUTE_TRIGGER_FINISH", "Trigger "+name+" FOR USERS (BEFORE UPDATE):") + record("TRACE_FINI", ""))
+		if len(events) != 2 || events[0].Name != name || events[1].Name != name || events[1].Incomplete || events[0].Sequence != events[1].Sequence {
+			t.Fatal("quoted name split", events)
+		}
 	}
 }

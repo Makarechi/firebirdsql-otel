@@ -236,7 +236,7 @@ func run() error {
 	metricJSON, _ := json.Marshal(metrics)
 	sort.Slice(times, func(i, j int) bool { return times[i] < times[j] })
 	q := func(percent int) float64 { return float64(times[(*n-1)*percent/100]) / 1000 }
-	return json.NewEncoder(os.Stdout).Encode(map[string]any{"mode": *mode, "iterations": *n, "p50_us": q(50), "p95_us": q(95), "p99_us": q(99), "allocs_per_op": float64(after.Mallocs-before.Mallocs) / float64(*n), "bytes_per_op": float64(after.TotalAlloc-before.TotalAlloc) / float64(*n), "tcp_request_turns_per_op": float64(turns) / float64(*n), "tcp_client_bytes_per_op": float64(cb) / float64(*n), "tcp_server_bytes_per_op": float64(sb) / float64(*n), "json_span_bytes_per_op": float64(ex.bytes.Load()) / float64(*n), "spans_per_op": float64(ex.spans.Load()) / float64(*n), "metric_snapshot_json_bytes": len(metricJSON), "diagnostic_json_bytes_per_op": float64(extra.bytes.Load()) / float64(*n)})
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"allocation_scope": "benchmark_process_only", "mode": *mode, "iterations": *n, "p50_us": q(50), "p95_us": q(95), "p99_us": q(99), "allocs_per_op": float64(after.Mallocs-before.Mallocs) / float64(*n), "bytes_per_op": float64(after.TotalAlloc-before.TotalAlloc) / float64(*n), "tcp_request_turns_per_op": float64(turns) / float64(*n), "tcp_client_bytes_per_op": float64(cb) / float64(*n), "tcp_server_bytes_per_op": float64(sb) / float64(*n), "json_span_bytes_per_op": float64(ex.bytes.Load()) / float64(*n), "spans_per_op": float64(ex.spans.Load()) / float64(*n), "metric_snapshot_json_bytes": len(metricJSON), "diagnostic_json_bytes_per_op": float64(extra.bytes.Load()) / float64(*n)})
 }
 func errorsJoin(a, b error) error {
 	if a != nil {
