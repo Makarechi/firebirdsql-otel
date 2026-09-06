@@ -35,7 +35,9 @@ jobs:
         run: |
           go build -o "$RUNNER_TEMP/firebirdotel-trace" ./cmd/firebirdotel-trace
           echo "FIREBIRD_TRACE_BINARY=$RUNNER_TEMP/firebirdotel-trace" >> "$GITHUB_ENV"
-      - run: go test -race ./...
+      # MON$ snapshots and first-use Profiler setup share one Firebird database.
+      # Run packages sequentially to avoid cross-process server lock waits.
+      - run: go test -race -p 1 ./...
       - run: go vet ./...
       - run: go test ./internal/sqltext -run '^$' -fuzz FuzzAnalyze -fuzztime 5s -parallel 2
       - run: go test ./internal/traceparse -run '^$' -fuzz FuzzTraceChunks -fuzztime 5s -parallel 2

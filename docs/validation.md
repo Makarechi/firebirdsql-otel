@@ -17,12 +17,16 @@ docker exec -i firebirdotel-test /opt/firebird/bin/isql -b \
 export FIREBIRD_TEST_DSN='SYSDBA:synthetic-test-only@localhost:3050/var/lib/firebird/data/otel.fdb'
 go build -o /tmp/firebirdotel-trace ./cmd/firebirdotel-trace
 export FIREBIRD_TRACE_BINARY=/tmp/firebirdotel-trace
-go test -race -count=1 ./...
+go test -race -p 1 -count=1 ./...
 go vet ./...
 go mod verify
 go test ./internal/sqltext -run '^$' -fuzz FuzzAnalyze -fuzztime 10s -parallel 2
 go test ./internal/traceparse -run '^$' -fuzz FuzzTraceChunks -fuzztime 10s -parallel 2
 ```
+
+The `-p 1` flag runs packages sequentially: the MON$ tests and first-use Profiler
+setup share one database and can otherwise block each other on server locks.
+Unit tests without a live database do not need this flag.
 
 CI automates the same fixture/worker setup and uses five-second fuzz runs. Fuzzing
 checks panic safety and size invariants; golden canary tests separately check privacy.
