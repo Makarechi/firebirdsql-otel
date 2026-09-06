@@ -1,0 +1,35 @@
+[
+  {
+    "name": "EXECUTE PROCEDURE OTEL_OUTER",
+    "attributes": {
+      "db.operation.name": "EXECUTE PROCEDURE",
+      "db.stored_procedure.name": "OTEL_OUTER",
+      "firebird.source": "client",
+      "firebird.correlation": "exact"
+    }
+  },
+  {
+    "name": "SELECT OTEL_REPORT consumption",
+    "attributes": {
+      "firebird.duration.kind": "consumption_lifetime",
+      "firebird.rows.delivered": 2,
+      "firebird.rows.next_attempts": 3,
+      "firebird.rows.eof": true
+    }
+  },
+  {
+    "name": "SELECT RDB$DATABASE",
+    "attributes": {
+      "db.query.text": "SELECT CAST ( ? AS INTEGER ) FROM RDB$DATABASE"
+    }
+  },
+  {
+    "name": "SELECT RDB$DATABASE consumption",
+    "attributes": {
+      "error.type": "server",
+      "firebird.error.sqlstate": "22018",
+      "firebird.rows.delivered": 0,
+      "firebird.rows.eof": false
+    }
+  }
+]
