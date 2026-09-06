@@ -11,6 +11,15 @@ import (
 
 var safeRegisterMu sync.Mutex
 
+// Instrument enables safe Firebird query spans and operation duration metrics
+// using the application's global OpenTelemetry providers. Pass the returned
+// driver name to the existing sql.Open or framework setup. Call once at startup
+// and reuse the name; the application still owns connections and pool settings.
+// For optional telemetry overrides, use RegisterWithConfig.
+func Instrument() (string, error) {
+	return RegisterWithConfig(Config{})
+}
+
 // RegisterWithConfig registers instrumented Firebird and returns a driver name
 // for the application's existing sql.Open or framework configuration. It does
 // not connect to Firebird, configure a pool, or register pool statistics.

@@ -7,7 +7,7 @@ Initialize your application's OpenTelemetry providers, then register once at
 startup and pass the returned driver name to your existing database setup:
 
 ```go
-driverName, err := firebirdotel.RegisterWithConfig(firebirdotel.Config{})
+driverName, err := firebirdotel.Instrument()
 if err != nil {
     return err
 }
@@ -21,7 +21,7 @@ defer db.Close()
 // Keep your existing pool settings, startup checks and query calls here.
 ```
 
-The zero configuration uses global providers and enables safe query spans and
+The default instrumentation uses global providers and enables safe query spans and
 operation duration metrics. SQL literals and comments are sanitized; bind values
 and raw error messages are not exported. Creating a registration makes no
 Firebird connection. Registrations live until process exit, so reuse the returned
@@ -49,6 +49,9 @@ they do not gain the safe profile's privacy policy.
 Use it only for overrides such as providers, logical database aliases, fixed
 pool labels or opt-in diagnostic detail. DSN and pool settings remain in their
 existing application configuration.
+
+For those overrides, use `RegisterWithConfig(cfg)` instead of `Instrument()`.
+The ordinary instrumentation path requires no configuration object.
 
 Pool gauges are optional and separate from the operation metrics already
 enabled by registration. They observe the application's existing pool:

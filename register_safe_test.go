@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/nakagami/firebirdsql"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
@@ -25,7 +26,7 @@ func TestRegisterWithConfigDefaultsAndValidation(t *testing.T) {
 	if !reflect.DeepEqual(before, sql.Drivers()) {
 		t.Fatal("failed initialization consumed a global registration")
 	}
-	name, err := RegisterWithConfig(Config{})
+	name, err := Instrument()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +139,12 @@ func TestRegisterWithConfigConcurrentNames(t *testing.T) {
 func TestFirebird5RegisteredDriver(t *testing.T) {
 	dsn := integrationDSN(t)
 	cfg, rec, reader := setupTelemetry(t, Config{})
-	name, err := RegisterWithConfig(cfg)
+	previousTP, previousMP := otel.GetTracerProvider(), otel.GetMeterProvider()
+	otel.SetTracerProvider(cfg.TracerProvider)
+	otel.SetMeterProvider(cfg.MeterProvider)
+	defer otel.SetTracerProvider(previousTP)
+	defer otel.SetMeterProvider(previousMP)
+	name, err := Instrument()
 	if err != nil {
 		t.Fatal(err)
 	}
