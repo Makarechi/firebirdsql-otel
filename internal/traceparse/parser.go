@@ -57,6 +57,7 @@ var transaction = regexp.MustCompile(`^\t[ \t]*\(TRA_([0-9]+), [^\r\n]*\)$`)
 var statement = regexp.MustCompile(`^Statement ([0-9]+):$`)
 var parameter = regexp.MustCompile(`^param[0-9]+ = [^,\r\n]+, "`)
 var fetched = regexp.MustCompile(`^[0-9]+ records fetched$`)
+var performanceLine = regexp.MustCompile(`^[0-9]+ ms(?:, [0-9]+ (?:read\(s\)|write\(s\)|fetch\(es\)|mark\(s\)))*$`)
 var perf = regexp.MustCompile(`([0-9]+) (ms|read\(s\)|fetch\(es\)|mark\(s\))`)
 
 func New() *Parser { return &Parser{stacks: make(map[[2]int64][]frame)} }
@@ -117,7 +118,7 @@ func (p *Parser) Flush() []Event {
 func (p *Parser) consume(line string) []Event {
 	if p.collectSQL {
 		trim := strings.TrimSpace(line)
-		boundary := header.MatchString(line) || strings.HasPrefix(trim, "^^^") || parameter.MatchString(line) || fetched.MatchString(trim) || (len(trim) > 0 && trim[0] >= '0' && trim[0] <= '9' && perf.MatchString(trim))
+		boundary := header.MatchString(line) || strings.HasPrefix(trim, "^^^") || parameter.MatchString(line) || fetched.MatchString(trim)
 		if !boundary || !sqltext.LexicallyComplete(p.sql.String()) {
 			p.recordBytes += len(line) + 1
 			if p.recordBytes > MaxRecord || p.sql.Len()+len(line)+1 > MaxRecord {
@@ -272,7 +273,7 @@ func (p *Parser) consume(line string) []Event {
 		return nil
 	}
 	matches := perf.FindAllStringSubmatch(trim, -1)
-	if len(matches) > 0 && trim[0] >= '0' && trim[0] <= '9' {
+	if performanceLine.MatchString(trim) {
 		p.performanceSection = true
 		for _, m := range matches {
 			v, _ := strconv.ParseInt(m[1], 10, 64)

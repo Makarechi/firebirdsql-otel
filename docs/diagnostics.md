@@ -102,6 +102,9 @@ forms are omitted conservatively. Attachment/transaction/statement IDs are parse
 only in the metadata header, before SQL begins; ID-like SQL literal content cannot
 change the correlation scope. Blank SQL lines are preserved. PLAN recognition starts
 only after the native post-SQL caret separator and outside SQL literals/comments.
+Performance-shaped lines cannot end SQL collection. Statement counters are parsed
+only after a genuine post-SQL boundary, and must match the complete native counter
+line; expression aliases such as `1 ms` remain SQL even with native-looking indentation.
 Parameter metadata must match the native numbered, typed parameter-line prefix.
 SQL continuation identifiers beginning with `param` remain SQL. Framing tracks
 literals/comments/delimiters independently of sanitizer token and syntax limits,

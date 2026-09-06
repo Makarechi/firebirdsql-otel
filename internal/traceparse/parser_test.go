@@ -223,3 +223,29 @@ func TestLongSQLPreservesRecordBoundaries(t *testing.T) {
 		}
 	}
 }
+
+func TestSQLAliasDoesNotBecomePerformance(t *testing.T) {
+	for _, indent := range []string{"", "      ", "\t"} {
+		p := New()
+		sql := "SELECT\n" + indent + "1 ms\nFROM RDB$DATABASE"
+		events := p.Feed(record("EXECUTE_STATEMENT_START", "Statement 1:\n---\n"+sql) + record("EXECUTE_STATEMENT_FINISH", "Statement 1:\n---\n"+sql+"\n1 records fetched\n      7 ms, 2 read(s), 1 write(s), 4 fetch(es), 3 mark(s)") + record("TRACE_FINI", ""))
+		if len(events) != 2 {
+			t.Fatal("lost statement", events)
+		}
+		for _, e := range events {
+			if e.SQL != "SELECT ? MS FROM RDB$DATABASE" || e.Name != "SELECT RDB$DATABASE" || e.Incomplete {
+				t.Fatal("alias changed framing", events)
+			}
+		}
+		if events[0].DurationMS != 0 || events[1].DurationMS != 7 || events[1].Reads != 2 || events[1].Fetches != 4 || events[1].Marks != 3 {
+			t.Fatal("wrong performance counters", events)
+		}
+	}
+	for _, line := range []string{"      0 ms", "      5 ms, 1 fetch(es)"} {
+		p := New()
+		events := p.Feed(record("EXECUTE_PROCEDURE_START", "Procedure P:") + record("EXECUTE_PROCEDURE_FINISH", "Procedure P:\n"+line) + record("TRACE_FINI", ""))
+		if len(events) != 2 || events[1].Incomplete {
+			t.Fatal("native sparse counters rejected", events)
+		}
+	}
+}

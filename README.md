@@ -68,11 +68,17 @@ safe/otelsql wrappers are rejected to prevent double instrumentation. Arbitrary
 third-party connectors must also be uninstrumented; there is no universal API to
 detect opaque wrappers. A connector's optional Close capability is preserved,
 including its cleanup error; connectors without Close do not acquire that capability.
+OpenWithDriverConfig closes a newly created connector if instrumentation setup fails;
+OpenDBWithConfig leaves a caller-supplied connector owned by the caller on failure.
+The compatibility profile of OpenWithDriverConfig retains DSN-derived defaults.
 
 Inside a pinned `*sql.Conn`, use `firebirdotel.Raw(conn, callback)` to access the
 native connection. Do not retain it outside the callback. Optional driver, statement
 and column metadata interfaces are preserved exactly, including database/sql fallback.
-Next-result-set probes are forwarded once. Transaction completion telemetry retains
+Next-result-set probes are forwarded once. EOF exhaustion uses the exact sentinel,
+matching database/sql; wrapped EOF remains an error. ErrSkip is suppressed only for
+an exact sentinel on connection Exec/Query fast paths with database/sql fallback.
+Prepared calls and wrapped ErrSkip errors retain their spans and duration metrics. Transaction completion telemetry retains
 context values and span parentage without retaining cancellation.
 
 ## Configuration and privacy

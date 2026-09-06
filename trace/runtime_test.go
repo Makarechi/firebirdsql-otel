@@ -101,6 +101,10 @@ func TestFirebird5Trace(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	var aliasValue int
+	if err := db.QueryRowContext(ctx, "SELECT\n1 ms\nFROM OTEL_A").Scan(&aliasValue); err != nil || aliasValue != 1 {
+		t.Fatal("native expression alias failed", err)
+	}
 	longSQL := "SELECT 1 /*" + strings.Repeat("x", traceparse.MaxSQL-len("SELECT 1 /**/ FROM RDB$DATABASE")) + "*/ FROM RDB$DATABASE"
 	var value int
 	if err := db.QueryRowContext(ctx, longSQL).Scan(&value); err != nil || value != 1 {
@@ -111,7 +115,7 @@ func TestFirebird5Trace(t *testing.T) {
 		t.Fatal(err)
 	}
 	found := map[string]bool{}
-	for !(found["OTEL_OUTER"] && found["OTEL_NESTED_A"] && found["OTEL_DOUBLE"] && found["OTEL_A_CHANGED"] && found["SELECT RDB$DATABASE"]) {
+	for !(found["OTEL_OUTER"] && found["OTEL_NESTED_A"] && found["OTEL_DOUBLE"] && found["OTEL_A_CHANGED"] && found["SELECT RDB$DATABASE"] && found["expression alias"]) {
 		select {
 		case e, ok := <-r.Events():
 			if !ok {
@@ -129,6 +133,9 @@ func TestFirebird5Trace(t *testing.T) {
 					t.Fatal("maximum requested SQL lost framing", e)
 				}
 				found[e.Name] = true
+				if e.SQL == "SELECT ? MS FROM OTEL_A" {
+					found["expression alias"] = true
+				}
 			}
 		case <-ctx.Done():
 			t.Fatal(ctx.Err(), found)

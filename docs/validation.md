@@ -67,7 +67,12 @@ rejection and encoded-input tests. Later review regressions also cover malformed
 UTF-8 connection fields, lateral derived tables, UNKNOWN literals, optional connector
 cleanup/error identity, compiled nested PSQL in a live lock-wait snapshot, precise
 parameter metadata, recovery after sanitizer token-limit failures, and a native
-48 KiB SQL statement with record overhead.
+48 KiB SQL statement with record overhead. Driver contract tests additionally verify
+cleanup on owned-connector setup failures, compatibility DSN defaults, exact versus
+wrapped ErrSkip for direct/prepared Exec and Query (including duration counts), and
+wrapped EOF from both row iteration and result-set advancement. Trace tests cover
+expression aliases named ms with multiple indentation styles, native sparse/full
+counters, and an actual Firebird query using that alias.
 
 The TRUNCATE TABLE review suggestion was checked against the pinned Firebird 5.0.3
 [grammar](https://github.com/FirebirdSQL/firebird/blob/v5.0.3/src/dsql/parse.y) and isolated server: it is unsupported (SQLSTATE 42000, SQL code -104, unknown
