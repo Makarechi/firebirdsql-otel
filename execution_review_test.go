@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"io"
 	"testing"
 )
 
@@ -83,5 +84,42 @@ func TestExecutionDoesNotProbeLazyResult(t *testing.T) {
 			t.Fatal("application observed altered result", n, err)
 		}
 		_ = db.Close()
+	}
+}
+
+type cleanupConnector struct {
+	mockConnector
+	calls int
+	err   error
+}
+
+func (c *cleanupConnector) Close() error { c.calls++; return c.err }
+func TestConnectorCloseCapabilityAndError(t *testing.T) {
+	original := errors.New("cleanup failure")
+	raw := &cleanupConnector{err: original}
+	wrapped, err := WrapConnector(raw, SafeConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := wrapped.(io.Closer); !ok {
+		t.Fatal("lost closer capability")
+	}
+	if _, err := WrapConnector(wrapped, SafeConfig()); err == nil {
+		t.Fatal("accepted closing wrapper twice")
+	}
+	db := sql.OpenDB(wrapped)
+	if err := db.Close(); err != original || raw.calls != 1 {
+		t.Fatal("connector cleanup lost", err, raw.calls)
+	}
+	_ = db.Close()
+	if raw.calls != 1 {
+		t.Fatal("connector closed twice")
+	}
+	plain, err := WrapConnector(mockConnector{}, SafeConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := plain.(io.Closer); ok {
+		t.Fatal("invented closer capability")
 	}
 }
