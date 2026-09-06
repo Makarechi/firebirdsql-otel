@@ -63,7 +63,15 @@ ports, Firebird comparison aliases and bounded array subscripts, SAVEPOINT opera
 normal Commit/Rollback with open direct/prepared rows versus explicit Close, missing
 statement scope on the real server, literal ellipses, and malformed/oversized workers
 that ignore shutdown. A separate Windows CI job executes the pre-launch platform
-rejection and encoded-input tests.
+rejection and encoded-input tests. Later review regressions also cover malformed
+UTF-8 connection fields, lateral derived tables, UNKNOWN literals, optional connector
+cleanup/error identity, compiled nested PSQL in a live lock-wait snapshot, precise
+parameter metadata, recovery after sanitizer token-limit failures, and a native
+48 KiB SQL statement with record overhead.
+
+The TRUNCATE TABLE review suggestion was checked against the pinned Firebird 5.0.3
+[grammar](https://github.com/FirebirdSQL/firebird/blob/v5.0.3/src/dsql/parse.y) and isolated server: it is unsupported (SQLSTATE 42000, SQL code -104, unknown
+TRUNCATE token), so it remains an unclassified SQL operation.
 
 ## Measurement method
 

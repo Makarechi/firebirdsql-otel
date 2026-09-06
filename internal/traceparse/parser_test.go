@@ -11,7 +11,7 @@ func record(kind, body string) string {
 }
 func TestRealFormatAndPrivacy(t *testing.T) {
 	p := New()
-	text := record("EXECUTE_STATEMENT_START", "Statement 148:\n-----\nexecute procedure WORK('SECRET_CANARY_SQL')\n\nparam0 = text, SECRET_CANARY_ARG") + record("EXECUTE_PROCEDURE_START", "Procedure WORK:\n\nparam0 = SECRET_CANARY_ARG") + record("EXECUTE_PROCEDURE_FINISH", "Procedure WORK:\n  2 ms, 5 read(s), 20 fetch(es), 3 mark(s)\n\nTable                              Natural     Index    Update    Insert    Delete   Backout     Purge   Expunge\n"+strings.Repeat("*", 112)+"\n"+fmt.Sprintf("%-32s%10s%10s%10s%10d%10s%10s%10s%10s", "MY_TABLE", "", "", "", 1, "", "", "", "")) + record("EXECUTE_STATEMENT_FINISH", "Statement 148:\n-----\nexecute procedure WORK('SECRET_CANARY_SQL')") + record("TRACE_FINI", "SESSION_1 test")
+	text := record("EXECUTE_STATEMENT_START", "Statement 148:\n-----\nexecute procedure WORK('SECRET_CANARY_SQL')\n\nparam0 = char(32), \"SECRET_CANARY_ARG\"") + record("EXECUTE_PROCEDURE_START", "Procedure WORK:\n\nparam0 = char(32), \"SECRET_CANARY_ARG\"") + record("EXECUTE_PROCEDURE_FINISH", "Procedure WORK:\n  2 ms, 5 read(s), 20 fetch(es), 3 mark(s)\n\nTable                              Natural     Index    Update    Insert    Delete   Backout     Purge   Expunge\n"+strings.Repeat("*", 112)+"\n"+fmt.Sprintf("%-32s%10s%10s%10s%10d%10s%10s%10s%10s", "MY_TABLE", "", "", "", 1, "", "", "", "")) + record("EXECUTE_STATEMENT_FINISH", "Statement 148:\n-----\nexecute procedure WORK('SECRET_CANARY_SQL')") + record("TRACE_FINI", "SESSION_1 test")
 	var events []Event
 	for i := 0; i < len(text); i += 7 {
 		end := i + 7
@@ -192,6 +192,34 @@ func TestLiteralEllipsesAreNotTruncation(t *testing.T) {
 		events := p.Feed(record("EXECUTE_STATEMENT_START", "Statement 1:\n---\n"+sql) + record("TRACE_FINI", ""))
 		if len(events) != 1 || !events[0].Incomplete || events[0].SQL != "" || events[0].Name != "" {
 			t.Fatal("terminal marker missed", events)
+		}
+	}
+}
+
+func TestSQLContinuationIsNotParameterMetadata(t *testing.T) {
+	for _, name := range []string{"parameter_value", "param0", "param10_column"} {
+		p := New()
+		events := p.Feed(record("EXECUTE_STATEMENT_START", "Statement 1:\n---\nSELECT\n"+name+"\nFROM T\nparam0 = integer, \"SECRET_CANARY\"") + record("TRACE_FINI", ""))
+		if len(events) != 1 || events[0].Name != "SELECT T" || events[0].Incomplete || !strings.Contains(events[0].SQL, strings.ToUpper(name)) || strings.Contains(fmt.Sprint(events), "SECRET_CANARY") {
+			t.Fatal("incorrect parameter framing", events)
+		}
+	}
+}
+func TestLongSQLPreservesRecordBoundaries(t *testing.T) {
+	for _, sql := range []string{
+		"SELECT " + strings.Repeat("1+", 2200) + "1 FROM RDB$DATABASE",
+		"SELECT 1 /*" + strings.Repeat("x", MaxSQL-len("SELECT 1 /**/ FROM RDB$DATABASE")) + "*/ FROM RDB$DATABASE",
+	} {
+		p := New()
+		events := p.Feed(record("EXECUTE_STATEMENT_START", "Statement 1:\n---\n"+sql+"\n^^^^^^^^\nPLAN (RDB$DATABASE NATURAL)") + record("EXECUTE_PROCEDURE_START", "Procedure AFTER_LONG:") + record("EXECUTE_PROCEDURE_FINISH", "Procedure AFTER_LONG:") + record("TRACE_FINI", ""))
+		if len(events) != 3 || events[1].Name != "AFTER_LONG" || events[2].Name != "AFTER_LONG" || events[0].Kind == "gap" {
+			t.Fatal("long SQL swallowed following records", events)
+		}
+		if len(sql) < MaxSQL && (events[0].SQL != "" || !events[0].Incomplete) {
+			t.Fatal("token-limited SQL did not fail closed", events[0])
+		}
+		if len(sql) == MaxSQL && (events[0].Incomplete || events[0].Name != "SELECT RDB$DATABASE") {
+			t.Fatal("framing budget too small", events[0])
 		}
 	}
 }

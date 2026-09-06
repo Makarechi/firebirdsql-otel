@@ -38,11 +38,11 @@ func RunWorker(ctx context.Context, input io.Reader, output io.Writer) error {
  print_plan = true
  print_perf = true
  time_threshold = 0
- max_sql_length = 65536
+ max_sql_length = %d
  max_arg_length = 1
  max_arg_count = 1
 }
-`, filter)
+`, filter, traceparse.MaxSQL)
 	manager, err := firebirdsql.NewTraceManager(cfg.Address, cfg.User, cfg.Password, firebirdsql.GetDefaultServiceManagerOptions())
 	if err != nil {
 		return errors.New("trace: manager creation failed")

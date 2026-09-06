@@ -11,6 +11,9 @@ import (
 )
 
 const MaxRecord = 65536
+
+// MaxSQL leaves 16 KiB of the record envelope for native metadata, plan and counters.
+const MaxSQL = 48 * 1024
 const MaxScopes = 64
 const MaxDepth = 64
 
@@ -52,6 +55,8 @@ var header = regexp.MustCompile(`^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d+) \([^\r\n
 var attachment = regexp.MustCompile(`^\t[^\r\n]+ \(ATT_([0-9]+), [^\r\n]*\)$`)
 var transaction = regexp.MustCompile(`^\t[ \t]*\(TRA_([0-9]+), [^\r\n]*\)$`)
 var statement = regexp.MustCompile(`^Statement ([0-9]+):$`)
+var parameter = regexp.MustCompile(`^param[0-9]+ = [^,\r\n]+, "`)
+var fetched = regexp.MustCompile(`^[0-9]+ records fetched$`)
 var perf = regexp.MustCompile(`([0-9]+) (ms|read\(s\)|fetch\(es\)|mark\(s\))`)
 
 func New() *Parser { return &Parser{stacks: make(map[[2]int64][]frame)} }
@@ -112,7 +117,7 @@ func (p *Parser) Flush() []Event {
 func (p *Parser) consume(line string) []Event {
 	if p.collectSQL {
 		trim := strings.TrimSpace(line)
-		boundary := header.MatchString(line) || strings.HasPrefix(trim, "^^^") || strings.HasPrefix(trim, "param") || strings.Contains(trim, "records fetched") || (len(trim) > 0 && trim[0] >= '0' && trim[0] <= '9' && perf.MatchString(trim))
+		boundary := header.MatchString(line) || strings.HasPrefix(trim, "^^^") || parameter.MatchString(line) || fetched.MatchString(trim) || (len(trim) > 0 && trim[0] >= '0' && trim[0] <= '9' && perf.MatchString(trim))
 		if !boundary || !sqltext.LexicallyComplete(p.sql.String()) {
 			p.recordBytes += len(line) + 1
 			if p.recordBytes > MaxRecord || p.sql.Len()+len(line)+1 > MaxRecord {
@@ -262,7 +267,7 @@ func (p *Parser) consume(line string) []Event {
 		}
 		return nil
 	}
-	if strings.HasPrefix(trim, "param") || trim == "returns:" || strings.Contains(trim, "records fetched") {
+	if parameter.MatchString(line) || trim == "returns:" || fetched.MatchString(trim) {
 		p.collectSQL = false
 		return nil
 	}

@@ -47,8 +47,9 @@ snapshot, err := reader.Read(ctx, monitoring.Scope{
 A nonzero attachment is mandatory. The reader rejects the target attachment itself
 as a diagnostic connection. Each call owns and completes one transaction containing
 a visibility query to MON$ATTACHMENTS followed by queries to MON$STATEMENTS, MON$CALL_STACK, MON$COMPILED_STATEMENTS, MON$TABLE_STATS and
-MON$RECORD_STATS. Compiled statement details cover the scoped top-level statements;
-the call stack separately describes sampled routines. SQL and plan BLOBs are not read.
+MON$RECORD_STATS. Compiled statement details include IDs referenced by both the scoped top-level
+statements and their MON$CALL_STACK entries, deduplicated and bounded together.
+This includes compiled procedures, functions and triggers reached by those calls. SQL and plan BLOBs are not read.
 
 `CapturedAt` is taken immediately before the first MON$ query, after pool acquisition
 and transaction setup. Catalog and monitoring names lose only right-hand ASCII-space
@@ -101,6 +102,10 @@ forms are omitted conservatively. Attachment/transaction/statement IDs are parse
 only in the metadata header, before SQL begins; ID-like SQL literal content cannot
 change the correlation scope. Blank SQL lines are preserved. PLAN recognition starts
 only after the native post-SQL caret separator and outside SQL literals/comments.
+Parameter metadata must match the native numbered, typed parameter-line prefix.
+SQL continuation identifiers beginning with `param` remain SQL. Framing tracks
+literals/comments/delimiters independently of sanitizer token and syntax limits,
+so omitting an unsupported SQL description does not swallow subsequent records.
 Table headings are accepted only after a performance record; embedded headers and
 table-shaped text inside SQL literals/comments remain sanitizer input.
 Unterminated SQL is held conservatively until a size bound or flush marks it incomplete.
@@ -116,7 +121,9 @@ or add dialect 1 support, and does not alter explicit routine/table identity fie
 
 Names and table identities are schema metadata, not secret argument values. Client
 SQL, bind parameters, connection strings, user/process details and raw error lines
-are not forwarded. SQL record staging and lines are bounded at 64 KiB, SQL output
+are not forwarded. SQL record staging and lines are bounded at 64 KiB. The worker requests at most
+48 KiB of SQL, leaving 16 KiB for record metadata, plans and counters; the complete
+record cap still applies to exceptionally large metadata/plan output. SQL output
 at 4096 bytes, table summaries at 64, nesting at 64, active attachment/transaction
 scopes at 64, and the public queue at 1–256 events (64 by default). Worker configuration
 input has a shared bound allowing six-byte JSON expansion of every accepted field;

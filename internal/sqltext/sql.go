@@ -363,16 +363,6 @@ func lex(s string) ([]token, bool) {
 	return out, len(delimiters) == 0
 }
 
-// LexicallyComplete reports whether a bounded SQL fragment has closed literals,
-// comments and delimiters. It is a framing aid, not full SQL syntax validation.
-func LexicallyComplete(s string) bool {
-	if len(s) > MaxInput || !utf8.ValidString(s) {
-		return false
-	}
-	ts, ok := lex(s)
-	return ok && len(ts) > 0
-}
-
 // HasTerminalEllipsis recognizes a terminal Trace marker outside removed comments.
 // An unterminated literal/comment is already incomplete; dots inside complete SQL
 // literals or comments are not truncation markers.

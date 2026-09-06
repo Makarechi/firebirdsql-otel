@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Makarechi/firebirdsql-otel/internal/traceparse"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -100,8 +101,17 @@ func TestFirebird5Trace(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	longSQL := "SELECT 1 /*" + strings.Repeat("x", traceparse.MaxSQL-len("SELECT 1 /**/ FROM RDB$DATABASE")) + "*/ FROM RDB$DATABASE"
+	var value int
+	if err := db.QueryRowContext(ctx, longSQL).Scan(&value); err != nil || value != 1 {
+		t.Fatal("large native SQL failed", err)
+	}
+	// The parser finalizes a record on the following native header.
+	if err := db.QueryRowContext(ctx, "select count(*) from OTEL_A").Scan(&value); err != nil {
+		t.Fatal(err)
+	}
 	found := map[string]bool{}
-	for !(found["OTEL_OUTER"] && found["OTEL_NESTED_A"] && found["OTEL_DOUBLE"] && found["OTEL_A_CHANGED"]) {
+	for !(found["OTEL_OUTER"] && found["OTEL_NESTED_A"] && found["OTEL_DOUBLE"] && found["OTEL_A_CHANGED"] && found["SELECT RDB$DATABASE"]) {
 		select {
 		case e, ok := <-r.Events():
 			if !ok {
@@ -115,6 +125,9 @@ func TestFirebird5Trace(t *testing.T) {
 				t.Fatal("unexecuted branch emitted")
 			}
 			if e.Phase == "finish" {
+				if e.Name == "SELECT RDB$DATABASE" && e.SQL != "SELECT ? FROM RDB$DATABASE" {
+					t.Fatal("maximum requested SQL lost framing", e)
+				}
 				found[e.Name] = true
 			}
 		case <-ctx.Done():

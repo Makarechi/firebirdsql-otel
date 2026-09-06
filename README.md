@@ -66,7 +66,8 @@ telemetry. A rows-affected attribute is available only for a concrete cached
 `(*sql.DB, error)`. `WrapConnector` is available for framework integration. Known
 safe/otelsql wrappers are rejected to prevent double instrumentation. Arbitrary
 third-party connectors must also be uninstrumented; there is no universal API to
-detect opaque wrappers.
+detect opaque wrappers. A connector's optional Close capability is preserved,
+including its cleanup error; connectors without Close do not acquire that capability.
 
 Inside a pinned `*sql.Conn`, use `firebirdotel.Raw(conn, callback)` to access the
 native connection. Do not retain it outside the callback. Optional driver, statement
@@ -84,7 +85,8 @@ context values and span parentage without retaining cancellation.
   expose secrets contained in SQL.** Bind arguments and error messages remain suppressed.
 - `Connection.ParseDSNNetwork` opts into conservative host/port extraction. Credentials,
   usernames and database file paths are not automatically exported. Explicit Host,
-  Port and Namespace override inference; ambiguous authorities are omitted.
+  Port and Namespace override inference; ambiguous authorities are omitted. Explicit
+  Host and Namespace must contain valid UTF-8.
 - `SpanAttributes` and `MetricAttributes` are separate. These attributes, logical aliases,
   and object hints are trusted caller configuration: do not put secrets in them. Keep
   metric dimensions to a small, stable vocabulary.
