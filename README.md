@@ -1,123 +1,64 @@
 # firebirdsql-otel
 
-OpenTelemetry instrumentation helpers for the Go Firebird driver
-[`github.com/nakagami/firebirdsql`](https://github.com/nakagami/firebirdsql).
+OpenTelemetry instrumentation for the Go Firebird driver
+[`nakagami/firebirdsql`](https://github.com/nakagami/firebirdsql) **v0.9.20**.
+Uses OpenTelemetry Go **v1.44.0** and requires Go 1.25 or later.
 
-This package gives Firebird applications the same ergonomic shape that many
-PostgreSQL projects use: open an instrumented `*sql.DB` once, then normal
-`ExecContext`, `QueryContext`, `PrepareContext`, transactions, and procedure
-calls produce spans automatically.
+## Quick start
 
-For new integrations, use [safe driver registration](docs/instrumentation.md):
-`Instrument()` returns the driver name for your existing
-`sql.Open` or framework setup. Your application keeps its connection configuration,
-pool settings and lifecycle. The compatibility examples below retain their
-original SQL/error recording policy.
-
-## Install
-
-```bash
-go get github.com/Makarechi/firebirdsql-otel
-```
-
-## Usage
+Initialize OpenTelemetry in your application as usual. Enable instrumentation
+once at startup, then use the returned driver name in your existing database setup:
 
 ```go
-package main
-
-import (
-	"context"
-	"log"
-
-	firebirdotel "github.com/Makarechi/firebirdsql-otel"
-)
-
-func main() {
-	ctx := context.Background()
-	dsn := "sysdba:masterkey@localhost:3050/var/lib/firebird/app.fdb"
-
-	db, err := firebirdotel.Open(dsn)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer db.Close()
-
-	_, err = db.ExecContext(ctx, "execute procedure recalculate_invoice(?)", 42)
-	if err != nil {
-		log.Fatal(err)
-	}
-}
-```
-
-If your framework needs a driver name instead of a ready `*sql.DB`:
-
-```go
-driverName, err := firebirdotel.Register()
+driverName, err := firebirdotel.Instrument()
 if err != nil {
-	log.Fatal(err)
+    return err
 }
 
+// Your ordinary database/sql setup.
 db, err := sql.Open(driverName, dsn)
-```
-
-## Metrics
-
-Operation duration metrics are emitted through `otelsql`. You can also register
-standard `database/sql` pool statistics:
-
-```go
-reg, err := firebirdotel.RegisterDBStatsMetrics(db, dsn)
 if err != nil {
-	log.Fatal(err)
+    return err
 }
-defer reg.Unregister()
+defer db.Close()
+
+// Existing queries use the request context.
+_, err = db.ExecContext(ctx, "execute procedure BILL_UPDATE(?)", id)
 ```
 
-Pass custom OpenTelemetry providers when your application does not use the
-global providers:
+Imports: `database/sql` and
+`firebirdotel "github.com/Makarechi/firebirdsql-otel"`.
+See the [complete example](examples/safe/main.go).
 
-```go
-db, err := firebirdotel.Open(
-	dsn,
-	firebirdotel.WithTracerProvider(tracerProvider),
-	firebirdotel.WithMeterProvider(meterProvider),
-)
-```
+`Instrument()` needs no configuration object. It uses the application's global
+OTel providers and adds child spans to the trace in the query context, records
+operation duration metrics, and sanitizes SQL before exporting it. Attributes
+include `db.system.name=firebirdsql`, `db.operation.name`, and sanitized
+`db.query.text`. Bind values and raw error messages are never exported.
 
-## What You See
+Your application keeps its connection settings, pool limits, startup checks and
+shutdown. Reuse the returned driver name; registration lasts until process exit.
+Frameworks such as GORM can use the same name as their `DriverName`.
+Instrumentation is attached before creating `*sql.DB`; database/sql cannot change
+the driver of an already-open pool.
 
-For a stored procedure call from Go, for example:
+## Optional features
 
-```sql
-execute procedure recalculate_invoice(?)
-```
-
-the trace shows the Go application calling Firebird, the elapsed time, the SQL
-text when enabled by semantic-convention settings, and any returned error.
-
-The instrumentation does not inspect work inside the Firebird engine. It will
-not automatically show which tables, indexes, triggers, or nested procedures
-were used inside the stored procedure. That level of detail needs Firebird
-server-side tracing or a separate integration with Firebird Trace API output.
-
-## Firebird Service API
-
-The main SQL path is covered by `database/sql` instrumentation. Firebird-specific
-administrative APIs such as backup, nbackup, maintenance, user management, trace
-sessions, and events are not SQL queries. They use the Firebird Services API or
-event protocol, so they need separate wrappers if you want spans around those
-operations.
-
-This repository is structured so those wrappers can be added without changing
-the SQL instrumentation API.
+- [Frameworks, connectors and pool statistics](docs/instrumentation.md).
+- [Custom telemetry settings, privacy and compatibility](docs/client.md).
+  Use `RegisterWithConfig` only when you need overrides such as pool labels or
+  specific providers. Existing `Open`/`Register` APIs retain their legacy behavior.
+- [Server diagnostics](docs/diagnostics.md): metadata, MON$, Trace and Profiler.
+  These are separate opt-in tools; ordinary instrumentation never starts them.
 
 ## Development
 
-Run tests:
-
-```bash
-go test ./...
+```sh
+go test -race ./...
+go vet ./...
 ```
 
-The tests use an in-memory mock SQL driver and do not require a running Firebird
-server.
+CI also tests against an isolated Firebird 5.0.3 database.
+See [validation and measured costs](docs/validation.md),
+[design decisions](docs/adr-001-safe-client.md), and
+[handoff coverage](docs/handoff-01.md).

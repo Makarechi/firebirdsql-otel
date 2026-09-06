@@ -362,3 +362,17 @@ func lex(s string) ([]token, bool) {
 	}
 	return out, len(delimiters) == 0
 }
+
+// HasTerminalEllipsis recognizes a terminal Trace marker outside removed comments.
+// An unterminated literal/comment is already incomplete; dots inside complete SQL
+// literals or comments are not truncation markers.
+func HasTerminalEllipsis(s string) bool {
+	if !strings.HasSuffix(strings.TrimSpace(s), "...") {
+		return false
+	}
+	if len(s) > MaxInput || !utf8.ValidString(s) {
+		return true
+	}
+	ts, ok := lex(s)
+	return !ok || len(ts) > 0 && ts[len(ts)-1].text == "."
+}
