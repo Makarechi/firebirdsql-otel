@@ -3,6 +3,7 @@ package firebirdotel
 import (
 	"context"
 	"errors"
+	"unicode/utf8"
 
 	"github.com/Makarechi/firebirdsql-otel/internal/sqltext"
 	"go.opentelemetry.io/otel/attribute"
@@ -91,6 +92,9 @@ func normalizeConfig(c Config) (Config, error) {
 	}
 	if c.SQL.MaxInputBytes < 1 || c.SQL.MaxInputBytes > sqltext.MaxInput || c.SQL.MaxOutputBytes < 1 || c.SQL.MaxOutputBytes > sqltext.MaxOutput {
 		return c, errors.New("firebirdotel: SQL limits exceed hard bounds")
+	}
+	if !utf8.ValidString(c.Connection.Host) || !utf8.ValidString(c.Connection.Namespace) {
+		return c, errors.New("firebirdotel: connection attributes must be valid UTF-8")
 	}
 	if c.Connection.Port < 0 || c.Connection.Port > 65535 {
 		return c, errors.New("firebirdotel: invalid port")

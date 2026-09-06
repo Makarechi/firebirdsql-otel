@@ -129,6 +129,9 @@ func analyze(sql string, inputLimit, outputLimit int, quotedIdentifiers bool) De
 			target = start + 2
 		}
 	}
+	if op == "SELECT" && target >= 0 && target+1 < len(ts) && ts[target].text == "LATERAL" && ts[target+1].text == "(" {
+		target = -1 // A derived table is not a selectable procedure.
+	}
 	name, end := objectName(ts, target)
 	d.Summary = d.Operation
 	if name != "" {
@@ -327,7 +330,7 @@ func lex(s string) ([]token, bool) {
 				i += sz
 			}
 			word := strings.ToUpper(s[start:i])
-			if word == "NULL" || word == "TRUE" || word == "FALSE" {
+			if word == "NULL" || word == "TRUE" || word == "FALSE" || word == "UNKNOWN" {
 				add("?", false)
 			} else {
 				add(word, true)
