@@ -8,6 +8,12 @@ PostgreSQL projects use: open an instrumented `*sql.DB` once, then normal
 `ExecContext`, `QueryContext`, `PrepareContext`, transactions, and procedure
 calls produce spans automatically.
 
+For new integrations, use [safe driver registration](docs/instrumentation.md):
+`RegisterWithConfig(Config{})` returns the driver name for your existing
+`sql.Open` or framework setup. Your application keeps its connection configuration,
+pool settings and lifecycle. The compatibility examples below retain their
+original SQL/error recording policy.
+
 ## Install
 
 ```bash
@@ -115,4 +121,3 @@ go test ./...
 
 The tests use an in-memory mock SQL driver and do not require a running Firebird
 server.
-

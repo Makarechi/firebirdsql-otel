@@ -112,6 +112,9 @@ func WrapConnector(connector driver.Connector, c Config) (driver.Connector, erro
 	if _, ok := connector.(interface{ firebirdInstrumentedConnector() }); ok {
 		return nil, errors.New("firebirdotel: connector is already instrumented")
 	}
+	if _, ok := connector.Driver().(interface{ firebirdInstrumentedDriver() }); ok {
+		return nil, errors.New("firebirdotel: driver is already instrumented")
+	}
 	// otelsql has no public unwrapping contract. Reject its known wrappers rather than double wrapping them.
 	t := reflect.TypeOf(connector.Driver())
 	if t != nil {
