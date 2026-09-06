@@ -9,7 +9,7 @@ PostgreSQL projects use: open an instrumented `*sql.DB` once, then normal
 calls produce spans automatically.
 
 For new integrations, use [safe driver registration](docs/instrumentation.md):
-`RegisterWithConfig(Config{})` returns the driver name for your existing
+`Instrument()` returns the driver name for your existing
 `sql.Open` or framework setup. Your application keeps its connection configuration,
 pool settings and lifecycle. The compatibility examples below retain their
 original SQL/error recording policy.
