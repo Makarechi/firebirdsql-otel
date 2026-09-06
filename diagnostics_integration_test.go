@@ -84,6 +84,11 @@ func TestFirebird5MetadataMonitoring(t *testing.T) {
 	if !heldRows.Next() {
 		t.Fatal("missing live row")
 	}
+	missing, err := mon.Read(ctx, monitoring.Scope{AttachmentID: attachment, StatementID: 9223372036854775807})
+	if err != monitoring.ErrStatementNotVisible || missing.Correlation != "unmatched" {
+		t.Fatal("missing live statement accepted", missing, err)
+	}
+
 	for i := 0; i < 2; i++ {
 		snap, err := mon.Read(ctx, monitoring.Scope{AttachmentID: attachment})
 		if err != nil {

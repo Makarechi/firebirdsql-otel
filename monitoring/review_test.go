@@ -91,3 +91,24 @@ func TestInvisibleTargetFailsInsteadOfReturningIdleSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestMissingStatementTargetIsUnmatched(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	r, _ := New(db, 5)
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT CURRENT_CONNECTION").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(99))
+	mock.ExpectQuery(`SELECT MON\$ATTACHMENT_ID FROM MON\$ATTACHMENTS`).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(7))
+	mock.ExpectQuery(`FROM MON\$STATEMENTS S WHERE S.MON\$ATTACHMENT_ID = \? AND S.MON\$STATEMENT_ID = \?`).WithArgs(7, 8).WillReturnRows(sqlmock.NewRows([]string{"id", "att", "tx", "state", "compiled"}))
+	mock.ExpectRollback()
+	s, err := r.Read(t.Context(), Scope{AttachmentID: 7, StatementID: 8})
+	if err != ErrStatementNotVisible || s.Correlation != "unmatched" {
+		t.Fatal("missing statement looked valid", s, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
