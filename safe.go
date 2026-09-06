@@ -50,8 +50,20 @@ func OpenWithDriverConfig(d driver.Driver, dsn string, c Config) (*sql.DB, error
 	if err != nil {
 		return nil, err
 	}
+	if c.Profile == Compatibility {
+		return OpenDBWithDSN(connector, dsn, compatibilityOptions(c)...), nil
+	}
 	c.Connection = resolveConnection(dsn, c.Connection)
-	return OpenDBWithConfig(connector, c)
+	db, err := OpenDBWithConfig(connector, c)
+	if err != nil {
+		// This constructor owns the connector until a database accepts ownership.
+		if closer, ok := connector.(io.Closer); ok {
+			if closeErr := closer.Close(); closeErr != nil {
+				err = errors.Join(err, closeErr)
+			}
+		}
+	}
+	return db, err
 }
 
 // OpenDBWithConfig takes an uninstrumented, client-dialect-3 connector.
