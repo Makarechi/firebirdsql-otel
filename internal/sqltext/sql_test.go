@@ -95,3 +95,30 @@ func TestFirebirdOperatorsAndArraySubscripts(t *testing.T) {
 		}
 	}
 }
+
+func TestLateralDerivedTableAndUnknownLiteral(t *testing.T) {
+	d := Analyze("SELECT * FROM LATERAL (SELECT 1 FROM RDB$DATABASE)", 0, 0)
+	if !d.Valid || d.Summary != "SELECT" || d.Procedure != "" {
+		t.Fatal("derived table reported as procedure", d)
+	}
+	for _, q := range []string{`SELECT * FROM "LATERAL"(1)`, `SELECT * FROM REPORT(1)`} {
+		if d := Analyze(q, 0, 0); !d.Valid || d.Procedure == "" {
+			t.Fatal("selectable procedure lost", d)
+		}
+	}
+	var fingerprint string
+	for _, literal := range []string{"TRUE", "FALSE", "NULL", "UNKNOWN"} {
+		d := Analyze("SELECT * FROM T WHERE FLAG IS "+literal, 0, 0)
+		if !d.Valid || d.Text != "SELECT * FROM T WHERE FLAG IS ?" {
+			t.Fatal("boolean literal not removed", d)
+		}
+		if fingerprint != "" && fingerprint != d.Fingerprint {
+			t.Fatal("inconsistent boolean fingerprint")
+		}
+		fingerprint = d.Fingerprint
+	}
+	d = Analyze(`SELECT "UNKNOWN" FROM T`, 0, 0)
+	if !strings.Contains(d.Text, `"UNKNOWN"`) {
+		t.Fatal("quoted identifier removed", d)
+	}
+}

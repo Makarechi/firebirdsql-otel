@@ -123,3 +123,14 @@ func TestExplicitPortWithoutHost(t *testing.T) {
 		}
 	}
 }
+
+func TestConnectionAttributesRequireValidUTF8(t *testing.T) {
+	for _, connection := range []ConnectionAttributes{{Host: "db\xff"}, {Namespace: "billing\xff"}} {
+		if _, err := normalizeConfig(Config{Connection: connection}); err == nil {
+			t.Fatal("invalid UTF-8 accepted")
+		}
+	}
+	if _, err := normalizeConfig(Config{Connection: ConnectionAttributes{Host: "сервер", Namespace: "оплата"}}); err != nil {
+		t.Fatal("valid Unicode rejected", err)
+	}
+}
