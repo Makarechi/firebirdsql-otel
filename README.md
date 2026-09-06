@@ -8,29 +8,44 @@ sanitized SQL, procedure-aware names, safe error codes/status, and optional curs
 consumption diagnostics. Metadata, MON$, Trace and Profiler are explicit diagnostic
 sources, never hidden work performed by ordinary client calls.
 
-## Safe client
+## Add instrumentation
+
+Keep your existing connection configuration, pool settings and lifecycle.
+After initializing your application's OpenTelemetry providers, register the
+instrumented driver once and use its name in your normal database setup:
 
 ```go
-cfg := firebirdotel.SafeConfig()
-cfg.Connection.Namespace = "billing" // logical alias; no database file path
-cfg.TracerProvider = tracerProvider
-cfg.MeterProvider = meterProvider
-cfg.MetricAttributes = []attribute.KeyValue{attribute.String("pool", "primary")}
+driverName, err := firebirdotel.RegisterWithConfig(firebirdotel.Config{})
+if err != nil {
+    return err
+}
 
-db, err := firebirdotel.OpenWithConfig(dsn, cfg)
+// Existing database/sql setup; only the driver name changes.
+db, err := sql.Open(driverName, dsn)
 if err != nil {
     return err
 }
 defer db.Close()
 
-registration, err := firebirdotel.RegisterDBStatsMetricsWithConfig(db, cfg)
-if err != nil {
-    return err
-}
-defer registration.Unregister() // before shutting down the providers
-
 _, err = db.ExecContext(ctx, "execute procedure BILL_UPDATE(?)", id)
 ```
+
+The zero `Config` enables safe spans and operation duration metrics through the
+global providers. No separate instrumentation configuration function is required.
+Registration does not connect to Firebird or configure a pool. Reuse the returned
+name: database/sql driver registrations live until process exit.
+
+Frameworks can use the same name as their `DriverName`. Applications that already
+have a native connector can instead call `WrapConnector` before their existing
+`sql.OpenDB`. An already-open `*sql.DB` cannot have its driver replaced.
+See [framework integration and optional pool metrics](docs/instrumentation.md)
+and the [standalone example](examples/safe/main.go).
+
+`OpenWithConfig` and `OpenDBWithConfig` remain optional convenience functions.
+`Config` is for optional telemetry overrides such as providers, logical database
+aliases and fixed pool labels; it does not contain DSNs or pool limits.
+
+## Safe client behavior
 
 Safe client SQL descriptions use **client dialect 3**, which the pinned driver sets
 explicitly. Custom drivers/connectors supplied to the safe API must also use client
@@ -124,8 +139,9 @@ db, err = firebirdotel.OpenWithConfig(dsn, cfg)
 
 Compatibility mode keeps its original SQL/error recording policy; it does not
 inherit the new privacy guarantees. For frameworks requiring a registered driver
-name the existing `Register` APIs are unchanged. New safe opening does not register
-a new global driver name per pool.
+name the existing `Register` APIs are unchanged. `OpenWithConfig` does not register
+a new global driver name per pool; `RegisterWithConfig` explicitly registers a
+reusable name with the safe profile.
 
 ## Explicit diagnostic sources
 
