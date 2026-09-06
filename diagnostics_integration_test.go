@@ -6,6 +6,7 @@ import (
 	"github.com/Makarechi/firebirdsql-otel/metadata"
 	"github.com/Makarechi/firebirdsql-otel/monitoring"
 	"testing"
+	"time"
 )
 
 func TestFirebird5MetadataMonitoring(t *testing.T) {
@@ -108,5 +109,77 @@ func TestFirebird5MetadataMonitoring(t *testing.T) {
 			t.Fatal("statement scope not applied", scoped)
 		}
 		t.Logf("snapshot: %d statements, %d calls, %d compiled, %d tables", len(snap.Statements), len(snap.Calls), len(snap.Compiled), len(snap.Tables))
+	}
+}
+
+func TestFirebird5CompiledCallStack(t *testing.T) {
+	dsn := integrationDSN(t)
+	db, err := sql.Open(DriverName, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	locker, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer locker.Rollback()
+	if _, err := locker.ExecContext(ctx, "update OTEL_A set VAL=VAL where ID=1"); err != nil {
+		t.Fatal(err)
+	}
+	worker, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer worker.Close()
+	var att int64
+	if err := worker.QueryRowContext(ctx, "select current_connection from rdb$database").Scan(&att); err != nil {
+		t.Fatal(err)
+	}
+	diag, err := sql.Open(DriverName, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer diag.Close()
+	reader, _ := monitoring.New(diag, 64)
+	finished := make(chan error, 1)
+	go func() { _, err := worker.ExecContext(ctx, "execute procedure OTEL_OUTER(?)", 7); finished <- err }()
+	// Always release the row lock before waiting for the driver; context cancellation
+	// alone is not a reliable way to interrupt a blocked native wire operation.
+	defer func() {
+		_ = locker.Rollback()
+		select {
+		case <-finished:
+		case <-time.After(10 * time.Second):
+			t.Error("blocked statement did not finish")
+		}
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		snap, err := reader.Read(ctx, monitoring.Scope{AttachmentID: att})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(snap.Calls) > 0 {
+			names := map[string]bool{}
+			for _, c := range snap.Compiled {
+				names[c.Name] = true
+			}
+			for _, call := range snap.Calls {
+				if !names[call.Name] {
+					t.Fatalf("call %s missing from compiled snapshot: %+v", call.Name, snap.Compiled)
+				}
+			}
+			if !names["OTEL_NESTED_A"] {
+				t.Fatal("fixture did not reach nested PSQL", snap)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no active PSQL call stack")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
