@@ -19,7 +19,7 @@ func main() {
 func run() error {
 	// Initialize your application's OTel providers before registration.
 	// Register once: the application keeps its existing database/sql setup.
-	driverName, err := firebirdotel.RegisterWithConfig(firebirdotel.Config{})
+	driverName, err := firebirdotel.Instrument()
 	if err != nil {
 		return err
 	}
