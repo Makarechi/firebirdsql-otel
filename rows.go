@@ -24,6 +24,7 @@ type rowsState struct {
 	delivered, attempts int64
 	first               time.Duration
 	eof                 bool
+	inTransaction       bool
 	closeErr, nextErr   error
 	cancellations       [2]rowCancellation
 }
@@ -57,6 +58,7 @@ func (t *telemetry) queryResult(op operation, r driver.Rows, err error, txContex
 	sources := [2]context.Context{op.ctx, nil}
 	if len(txContexts) > 0 {
 		sources[1] = txContexts[0]
+		state.inTransaction = txContexts[0] != nil
 	}
 	for i, source := range sources {
 		if source == nil || source.Done() == nil {
@@ -122,6 +124,12 @@ func (r *rowsState) Close() error {
 			observed = r.closeErr
 		}
 		kind := "early_close"
+		// database/sql closes rows before invoking driver Commit/Rollback and does
+		// not expose its private transaction cancellation context to the driver.
+		// An explicit Close and that automatic Close are indistinguishable here.
+		if r.inTransaction {
+			kind = "transaction_close_unknown"
+		}
 		if eof {
 			kind = "eof"
 		}

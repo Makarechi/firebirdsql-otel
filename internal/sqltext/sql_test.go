@@ -74,3 +74,24 @@ func TestUnknownDialectOmitsAmbiguousDescription(t *testing.T) {
 		t.Fatalf("dialect 3 identifiers lost: %+v", d)
 	}
 }
+
+func TestFirebirdOperatorsAndArraySubscripts(t *testing.T) {
+	for _, q := range []string{"SELECT A FROM T WHERE A ^= 12345", "SELECT A FROM T WHERE A ~= 12345", "SELECT VALUES_COL[12345] FROM T", "SELECT VALUES_COL[(12345+1),2] FROM T"} {
+		d := Analyze(q, 0, 0)
+		if !d.Valid || d.Text == "" || d.Fingerprint == "" || strings.Contains(d.Text, "12345") {
+			t.Fatal("valid expression omitted or literal leaked", q, d)
+		}
+	}
+	for _, q := range []string{"SELECT A[1 FROM T", "SELECT A] FROM T", "SELECT A[(1]) FROM T", "SELECT A" + strings.Repeat("[", 129) + "1" + strings.Repeat("]", 129) + " FROM T"} {
+		if d := Analyze(q, 0, 0); d.Valid || d.Text != "" {
+			t.Fatal("invalid brackets accepted", d)
+		}
+	}
+	for _, q := range []string{"SAVEPOINT nested", "RELEASE SAVEPOINT nested"} {
+		d := Analyze(q, 0, 0)
+		want := strings.Fields(q)[0]
+		if !d.Valid || d.Operation != want || d.Summary != want {
+			t.Fatal("transaction operation omitted", d)
+		}
+	}
+}

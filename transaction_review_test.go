@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -197,5 +198,83 @@ func TestCoincidentalOtelsqlPackageNameIsAccepted(t *testing.T) {
 	defer db.Close()
 	if _, err := db.ExecContext(t.Context(), "select 1"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestNormalTransactionCompletionWithOpenRows(t *testing.T) {
+	for _, method := range []string{"commit", "rollback", "close"} {
+		for _, prepared := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/prepared=%v", method, prepared), func(t *testing.T) {
+				cfg, rec, _ := setupTelemetry(t, DiagnosticConfig())
+				raw := &closingRows{scriptRows: scriptRows{remaining: 2}, closed: make(chan struct{})}
+				db, err := OpenDBWithConfig(scriptConnector{&transactionRowsConn{scriptConn{rows: func() driver.Rows { return raw }}}}, cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer db.Close()
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				tx, err := db.BeginTx(ctx, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer tx.Rollback()
+				var rows *sql.Rows
+				if prepared {
+					stmt, e := tx.PrepareContext(t.Context(), "select * from report")
+					if e != nil {
+						t.Fatal(e)
+					}
+					defer stmt.Close()
+					rows, err = stmt.QueryContext(t.Context())
+				} else {
+					rows, err = tx.QueryContext(t.Context(), "select * from report")
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				done := make(chan error, 1)
+				go func() {
+					switch method {
+					case "commit":
+						done <- tx.Commit()
+					case "rollback":
+						done <- tx.Rollback()
+					default:
+						done <- rows.Close()
+					}
+				}()
+				select {
+				case err = <-done:
+					if err != nil {
+						t.Fatal(err)
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatal("completion blocked on open rows")
+				}
+				if ctx.Err() != nil {
+					t.Fatal("original BeginTx context cancelled")
+				}
+				if method == "close" {
+					if rows.Err() != nil {
+						t.Fatal(rows.Err())
+					}
+				} else if !errors.Is(rows.Err(), context.Canceled) {
+					t.Fatal("expected database/sql private transaction cancellation", rows.Err())
+				}
+				count := 0
+				for _, span := range rec.Ended() {
+					if span.SpanKind() == trace.SpanKindInternal {
+						count++
+						if !containsAttribute(span.Attributes(), "firebird.rows.outcome", "transaction_close_unknown") || span.Status().Code == codes.Error {
+							t.Fatal("invented driver closure cause", span.Attributes(), span.Status())
+						}
+					}
+				}
+				if count != 1 || raw.closes != 1 || raw.nextCalls != 0 {
+					t.Fatal("incorrect cursor lifecycle", count, raw.closes, raw.nextCalls)
+				}
+			})
+		}
 	}
 }
