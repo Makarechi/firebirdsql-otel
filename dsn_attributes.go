@@ -15,9 +15,9 @@ func connectionAttributes(dsn string, c ConnectionAttributes) []attribute.KeyVal
 	host, port := c.Host, c.Port
 	if host != "" {
 		a = append(a, attribute.String("server.address", host))
-		if port > 0 {
-			a = append(a, attribute.Int("server.port", port))
-		}
+	}
+	if port > 0 {
+		a = append(a, attribute.Int("server.port", port))
 	}
 	if c.Namespace != "" {
 		a = append(a, attribute.String("db.namespace", c.Namespace))
