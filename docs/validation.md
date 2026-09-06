@@ -58,11 +58,17 @@ MON$ targets, multiline SQL comments/literals/blank lines, forged headers in lit
 quoted trigger names containing ` FOR `, forged table headings in SQL comments,
 maximum JSON-expanded worker input, transaction cancellation with direct/prepared
 queries, cancellation-independent completion, one-shot result-set probes and custom
-driver package names containing `otelsql`.
+driver package names containing `otelsql`. Further tests cover explicit hostless
+ports, Firebird comparison aliases and bounded array subscripts, SAVEPOINT operations,
+normal Commit/Rollback with open direct/prepared rows versus explicit Close, missing
+statement scope on the real server, literal ellipses, and malformed/oversized workers
+that ignore shutdown. A separate Windows CI job executes the pre-launch platform
+rejection and encoded-input tests.
 
 ## Measurement method
 
-Measurements below are a local reference, not a production capacity claim. Machine:
+Measurements below reference revision `692c215` and are a local baseline, not a
+production capacity claim. Machine:
 Apple M4, macOS; Firebird 5.0.3 amd64 Docker image under emulation. All real-query
 rows and mock Exec were remeasured on September 6 with Go 1.25.0 after review corrections. The real benchmark
 executes `SELECT N FROM OTEL_REPORT`, consumes its two rows to EOF, and uses a synchronous

@@ -66,7 +66,10 @@ Attachment table counters aggregate concurrent statements. No per-query attribut
 is inferred from their deltas. Short calls may be missed, and an empty result does not
 prove inactivity. An absent or invisible target attachment returns
 `ErrTargetNotVisible` with unmatched correlation instead of a successful empty
-snapshot; the reader cannot distinguish disconnection from insufficient permissions. Object/attachment identifiers are
+snapshot; the reader cannot distinguish disconnection from insufficient permissions.
+For a nonzero StatementID, the existing scoped MON$STATEMENTS read also validates the
+attachment/statement pair. An empty result returns `ErrStatementNotVisible` and
+unmatched correlation, without extra queries or fabricated idle-state data. Object/attachment identifiers are
 not metric dimensions. Each collection has a bounded row count and a truncation flag.
 
 ## Experimental Trace collector
@@ -102,7 +105,9 @@ Table headings are accepted only after a performance record; embedded headers an
 table-shaped text inside SQL literals/comments remain sanitizer input.
 Unterminated SQL is held conservatively until a size bound or flush marks it incomplete.
 The trigger/relation ` FOR ` separator is recognized only outside quoted identifiers,
-including doubled-quote escapes.
+including doubled-quote escapes. Only terminal ellipses outside complete comments
+are treated as truncation markers; ellipses inside literals/comments are sanitized
+normally. Unterminated lexical input still fails closed.
 Trace can include other applications, so its SQL client dialect is unknown. If the
 lexer sees double-quoted tokens outside removed literals/comments, the whole SQL
 text and object summary are omitted (generic SQL name), and the event is marked
@@ -133,12 +138,18 @@ are local to one collector; timestamps retain the server's local text without in
 a timezone. Neither a fully observed pair nor the presence of parent IDs proves a
 complete PSQL execution tree. Do not attach server events as exact HTTP children.
 
+**The supervised collector does not support Windows.** Start returns an error
+matching `errors.ErrUnsupported` before launching a worker on Windows; its interrupt
+mechanism requires Unix. Safe client instrumentation and other diagnostics are not
+restricted by this collector-specific check.
+
 **This is not a production in-process collector.** Upstream startup/read/stop calls
 lack cancellable lifecycle guarantees. RunWorker is the helper entry point only;
 applications should use the supervised process API. Shutdown sends an interrupt,
 allows one second for Stop/read completion/Close, then kills a blocked worker. Tests
 cover a nonresponsive worker, a full event queue, and real Firebird session shutdown.
-A forced kill reports failure/cleanup uncertainty. It releases local process/socket
+A forced kill reports failure/cleanup uncertainty, including when a malformed or
+oversized worker record also caused cancellation; both safe errors are retained. It releases local process/socket
 resources, but cannot guarantee server-side session removal. Inspect/stop sessions by
 the operator-chosen name before restarting after a forced shutdown. There is no
 automatic reconnect that silently reconstructs an allegedly complete tree.

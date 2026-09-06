@@ -8,9 +8,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"sync"
 	"time"
 
@@ -40,7 +42,11 @@ type Runtime struct {
 	err    error
 }
 
+// Start currently supports Unix process supervision. Windows is rejected before launch.
 func Start(ctx context.Context, c Config) (*Runtime, error) {
+	if runtime.GOOS == "windows" {
+		return nil, fmt.Errorf("trace: supervised collector is unsupported on Windows: %w", errors.ErrUnsupported)
+	}
 	if c.Executable == "" || c.Address == "" || c.User == "" || c.Database == "" || c.Name == "" {
 		return nil, errors.New("trace: executable, address, user, database and session name required")
 	}
@@ -106,10 +112,9 @@ func Start(ctx context.Context, c Config) (*Runtime, error) {
 		<-drained
 		r.mu.Lock()
 		defer r.mu.Unlock()
-		if readErr != nil {
-			r.err = readErr
-		} else if waitErr != nil && (cmd.ProcessState == nil || !cmd.ProcessState.Success()) {
-			r.err = errors.New("trace: worker failed; server session cleanup may be required")
+		r.err = readErr
+		if waitErr != nil && (cmd.ProcessState == nil || !cmd.ProcessState.Success()) {
+			r.err = errors.Join(r.err, errors.New("trace: worker failed; server session cleanup may be required"))
 		}
 	}()
 	return r, nil

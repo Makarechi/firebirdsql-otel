@@ -39,3 +39,14 @@ jobs:
       - run: go vet ./...
       - run: go test ./internal/sqltext -run '^$' -fuzz FuzzAnalyze -fuzztime 5s -parallel 2
       - run: go test ./internal/traceparse -run '^$' -fuzz FuzzTraceChunks -fuzztime 5s -parallel 2
+
+  windows-platform:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify unsupported collector and portable input handling
+        run: go test ./trace -run 'TestUnsupportedWindowsCollector|TestEncodedWorkerConfigurationBound'

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -137,5 +138,45 @@ func TestEncodedWorkerConfigurationBound(t *testing.T) {
 		if _, err := decodeWorkerConfig(strings.NewReader(bad)); err == nil {
 			t.Fatal("accepted oversized or trailing input")
 		}
+	}
+}
+
+func TestMalformedWorkerRetainsCleanupUncertainty(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix signal helper")
+	}
+	for _, oversized := range []bool{false, true} {
+		t.Run(fmt.Sprint(oversized), func(t *testing.T) {
+			payload := "SECRET_CANARY_INVALID_JSON"
+			expected := "invalid worker record"
+			if oversized {
+				payload = strings.Repeat("x", 65537)
+				expected = "exceeds bound"
+			}
+			path := filepath.Join(t.TempDir(), "worker")
+			script := "#!/bin/sh\ntrap '' INT\nprintf '%s\\n' '" + payload + "'\nwhile :; do :; done\n"
+			if err := os.WriteFile(path, []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			r, err := Start(t.Context(), Config{Executable: path, Address: "localhost", User: "test", Database: "/db", Name: "test"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 4*time.Second)
+			defer cancel()
+			err = r.Wait(ctx)
+			if err == nil || !strings.Contains(err.Error(), expected) || !strings.Contains(err.Error(), "server session cleanup may be required") || strings.Contains(err.Error(), "SECRET_CANARY") {
+				t.Fatal("lost safe parse failure or cleanup uncertainty", err)
+			}
+		})
+	}
+}
+func TestUnsupportedWindowsCollector(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("verified on Windows CI")
+	}
+	r, err := Start(t.Context(), Config{Executable: "must-not-run.exe", Address: "localhost", User: "test", Database: "/db", Name: "test"})
+	if r != nil || !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatal("Windows launch was not rejected", err)
 	}
 }

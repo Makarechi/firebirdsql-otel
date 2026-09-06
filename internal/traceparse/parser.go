@@ -302,7 +302,7 @@ func (p *Parser) finish() *Event {
 	p.current = nil
 	if p.sql.Len() > 0 {
 		raw := p.sql.String()
-		if strings.Contains(raw, "...") {
+		if sqltext.HasTerminalEllipsis(raw) {
 			e.Incomplete = true
 		} else {
 			d := sqltext.AnalyzeUnknownDialect(raw, 0, 0)

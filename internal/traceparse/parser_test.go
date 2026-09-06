@@ -178,3 +178,20 @@ func TestQuotedTriggerRelationSeparator(t *testing.T) {
 		}
 	}
 }
+
+func TestLiteralEllipsesAreNotTruncation(t *testing.T) {
+	for _, sql := range []string{"SELECT '...' FROM RDB$DATABASE", "SELECT 1 /* ... */ FROM RDB$DATABASE", "SELECT 1 FROM RDB$DATABASE -- ...", "SELECT q'{...}' FROM RDB$DATABASE"} {
+		p := New()
+		events := p.Feed(record("EXECUTE_STATEMENT_START", "Statement 1:\n---\n"+sql) + record("TRACE_FINI", ""))
+		if len(events) != 1 || events[0].Incomplete || events[0].Name != "SELECT RDB$DATABASE" || events[0].SQL == "" || strings.Contains(events[0].SQL, "...") {
+			t.Fatal("literal/comment ellipsis mistaken for marker", events)
+		}
+	}
+	for _, sql := range []string{"SELECT 1 FROM RDB$DATABASE...", "SELECT 123..."} {
+		p := New()
+		events := p.Feed(record("EXECUTE_STATEMENT_START", "Statement 1:\n---\n"+sql) + record("TRACE_FINI", ""))
+		if len(events) != 1 || !events[0].Incomplete || events[0].SQL != "" || events[0].Name != "" {
+			t.Fatal("terminal marker missed", events)
+		}
+	}
+}

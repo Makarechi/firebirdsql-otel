@@ -46,9 +46,13 @@ and result consumption. The consumption span is an INTERNAL child of the query
 span. Its duration includes application pauses between reads; it is not Firebird
 engine execution time. Its aggregate counters distinguish rows delivered, Next
 attempts, EOF, early close and errors. No extra Next or SQL is performed. EOF records exhaustion, while final status also
-includes deferred Close errors. Query and transaction cancellation are mirrored until Close through
+includes deferred Close errors. Query and caller-supplied transaction cancellation are mirrored until Close through
 stoppable subscriptions, then released; cursor spans without recording return raw rows
 and skip per-row bookkeeping. EOF from non-row operations is a connection error.
+When transaction rows close without EOF or an observable error/cancellation, the
+outcome is `transaction_close_unknown`: database/sql hides the private cancellation
+used by normal Commit/Rollback, so a driver cannot distinguish that automatic closure
+from explicit Rows.Close. No cancellation error is invented and caller behavior is unchanged.
 
 `OpenWithDriverConfig` accepts an explicit `driver.Driver`, a DSN and Config; a
 `DriverContext` connector factory is called exactly once. The existing named-driver
