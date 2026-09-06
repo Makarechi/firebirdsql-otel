@@ -3,7 +3,6 @@ package firebirdotel
 import (
 	"context"
 	"database/sql/driver"
-	"errors"
 	"time"
 
 	"github.com/Makarechi/firebirdsql-otel/internal/sqltext"
@@ -25,12 +24,13 @@ type telemetry struct {
 	spanAttrs, metricAttrs []attribute.KeyValue
 }
 type operation struct {
-	ctx     context.Context
-	start   time.Time
-	method  string
-	d       description
-	enabled bool
-	t       *telemetry
+	ctx      context.Context
+	start    time.Time
+	method   string
+	d        description
+	enabled  bool
+	fallback bool
+	t        *telemetry
 }
 
 func newTelemetry(c Config) (*telemetry, error) {
@@ -91,7 +91,7 @@ func (t *telemetry) start(ctx context.Context, method string, d description) ope
 	return operation{ctx: ctx, start: time.Now(), method: method, d: d, enabled: enabled, t: t}
 }
 func (t *telemetry) finish(op operation, err error, extra []attribute.KeyValue) trace.SpanContext {
-	if errors.Is(err, driver.ErrSkip) {
+	if op.fallback && err == driver.ErrSkip {
 		return trace.SpanContext{}
 	}
 	end := time.Now()

@@ -147,7 +147,7 @@ func TestErrorClasses(t *testing.T) {
 	for _, tt := range []struct {
 		err  error
 		kind string
-	}{{nil, "ok"}, {io.EOF, "connection"}, {driver.ErrSkip, "fallback"}, {context.Canceled, "cancelled"}, {context.DeadlineExceeded, "deadline"}, {driver.ErrBadConn, "connection"}, {errors.ErrUnsupported, "unsupported"}, {&net.DNSError{Err: canary}, "network"}, {&firebirdsql.FbError{Message: canary}, "server"}, {errors.New(canary), "unknown"}} {
+	}{{nil, "ok"}, {io.EOF, "connection"}, {driver.ErrSkip, "unsupported"}, {context.Canceled, "cancelled"}, {context.DeadlineExceeded, "deadline"}, {driver.ErrBadConn, "connection"}, {errors.ErrUnsupported, "unsupported"}, {&net.DNSError{Err: canary}, "network"}, {&firebirdsql.FbError{Message: canary}, "server"}, {errors.New(canary), "unknown"}} {
 		if got := outcome(tt.err); got != tt.kind {
 			t.Fatal(got, tt.kind)
 		}

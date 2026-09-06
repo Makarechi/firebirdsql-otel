@@ -3,7 +3,6 @@ package firebirdotel
 import (
 	"context"
 	"database/sql/driver"
-	"errors"
 	"io"
 	"reflect"
 	"sync"
@@ -82,7 +81,7 @@ func (r *rowsState) Next(dest []driver.Value) error {
 		}
 	}
 	r.mu.Unlock()
-	if errors.Is(err, io.EOF) {
+	if err == io.EOF {
 		if _, ok := r.raw.(driver.RowsNextResultSet); !ok {
 			r.mu.Lock()
 			r.eof = true
@@ -166,7 +165,7 @@ func (r *rowsState) HasNextResultSet() bool {
 }
 func (r *rowsState) NextResultSet() error {
 	err := r.raw.(driver.RowsNextResultSet).NextResultSet()
-	if errors.Is(err, io.EOF) {
+	if err == io.EOF {
 		r.mu.Lock()
 		r.eof = true
 		r.mu.Unlock()
