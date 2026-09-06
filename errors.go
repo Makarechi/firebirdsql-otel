@@ -19,7 +19,7 @@ var sqlStatePattern = regexp.MustCompile(`^[0-9A-Z]{5}$`)
 // ErrorAttributes returns bounded codes, never err.Error(), Message, Params or wrapped messages.
 func ErrorAttributes(err error) []attribute.KeyValue {
 	kind := outcome(err)
-	if kind == "ok" || kind == "fallback" {
+	if kind == "ok" {
 		return nil
 	}
 	a := []attribute.KeyValue{attribute.String("error.type", kind)}
@@ -43,7 +43,7 @@ func outcome(err error) string {
 	case err == nil:
 		return "ok"
 	case errors.Is(err, driver.ErrSkip):
-		return "fallback"
+		return "unsupported"
 	case errors.Is(err, context.Canceled):
 		return "cancelled"
 	case errors.Is(err, context.DeadlineExceeded):

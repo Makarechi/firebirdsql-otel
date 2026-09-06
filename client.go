@@ -69,23 +69,27 @@ func (c *connState) begin(ctx context.Context, opts driver.TxOptions, withCtx bo
 }
 func (c *connState) Exec(q string, args []driver.Value) (driver.Result, error) {
 	op := c.t.start(context.Background(), "exec", c.t.describe(q))
+	op.fallback = true // database/sql retries only these connection fast paths.
 	r, err := c.raw.(driver.Execer).Exec(q, args)
 	c.t.finish(op, err, resultAttributes(r))
 	return r, err
 }
 func (c *connState) ExecContext(ctx context.Context, q string, args []driver.NamedValue) (driver.Result, error) {
 	op := c.t.start(ctx, "exec", c.t.describe(q))
+	op.fallback = true // database/sql retries only these connection fast paths.
 	r, err := c.raw.(driver.ExecerContext).ExecContext(ctx, q, args)
 	c.t.finish(op, err, resultAttributes(r))
 	return r, err
 }
 func (c *connState) Query(q string, args []driver.Value) (driver.Rows, error) {
 	op := c.t.start(context.Background(), "query", c.t.describe(q))
+	op.fallback = true // database/sql retries only these connection fast paths.
 	r, err := c.raw.(driver.Queryer).Query(q, args)
 	return c.t.queryResult(op, r, err, c.transactionContext())
 }
 func (c *connState) QueryContext(ctx context.Context, q string, args []driver.NamedValue) (driver.Rows, error) {
 	op := c.t.start(ctx, "query", c.t.describe(q))
+	op.fallback = true // database/sql retries only these connection fast paths.
 	r, err := c.raw.(driver.QueryerContext).QueryContext(ctx, q, args)
 	return c.t.queryResult(op, r, err, c.transactionContext())
 }
