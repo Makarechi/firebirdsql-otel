@@ -13,6 +13,9 @@ import (
 // ErrTargetNotVisible also covers targets that disconnected before the snapshot.
 var ErrTargetNotVisible = errors.New("monitoring: target attachment is absent or not visible")
 
+// ErrStatementNotVisible covers absent statements and statements outside the requested attachment.
+var ErrStatementNotVisible = errors.New("monitoring: target statement is absent or not visible in attachment")
+
 type Scope struct {
 	AttachmentID int64
 	StatementID  int64
@@ -116,6 +119,10 @@ func (r *Reader) Read(ctx context.Context, scope Scope) (Snapshot, error) {
 	})
 	if err != nil {
 		return out, err
+	}
+	if scope.StatementID != 0 && len(out.Statements) == 0 {
+		out.Correlation = "unmatched"
+		return out, ErrStatementNotVisible
 	}
 	query = fmt.Sprintf(`SELECT FIRST %d C.MON$CALL_ID,C.MON$STATEMENT_ID,C.MON$CALLER_ID,C.MON$OBJECT_NAME,C.MON$PACKAGE_NAME,C.MON$OBJECT_TYPE,C.MON$SOURCE_LINE,C.MON$SOURCE_COLUMN FROM MON$CALL_STACK C JOIN MON$STATEMENTS S ON S.MON$STATEMENT_ID=C.MON$STATEMENT_ID WHERE %s ORDER BY C.MON$CALL_ID`, r.maxRows+1, where)
 	err = r.scan(ctx, tx, query, args, &out, func(rows *sql.Rows) error {

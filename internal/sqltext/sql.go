@@ -145,7 +145,7 @@ func analyze(sql string, inputLimit, outputLimit int, quotedIdentifiers bool) De
 }
 func isOperation(s string) bool {
 	switch s {
-	case "SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "EXECUTE", "CREATE", "ALTER", "DROP", "RECREATE", "GRANT", "REVOKE", "COMMENT", "COMMIT", "ROLLBACK", "SET":
+	case "SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "EXECUTE", "CREATE", "ALTER", "DROP", "RECREATE", "GRANT", "REVOKE", "COMMENT", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE", "SET":
 		return true
 	}
 	return false
@@ -181,7 +181,7 @@ func Identifier(s string) bool {
 func lex(s string) ([]token, bool) {
 	out := make([]token, 0, 32)
 	add := func(v string, id bool) { out = append(out, token{v, id}) }
-	depth := 0
+	delimiters := make([]rune, 0, 8)
 	for i := 0; i < len(s); {
 		if len(out) >= 4096 {
 			return nil, false
@@ -334,18 +334,22 @@ func lex(s string) ([]token, bool) {
 			}
 			continue
 		}
-		if strings.ContainsRune("(),.;?=<>!+-*/|:%", r) {
-			if r == '(' {
-				depth++
-				if depth > 128 {
+		if strings.ContainsRune("()[],.;?=<>!^~+-*/|:%", r) {
+			if r == '(' || r == '[' {
+				delimiters = append(delimiters, r)
+				if len(delimiters) > 128 {
 					return nil, false
 				}
 			}
-			if r == ')' {
-				depth--
-				if depth < 0 {
+			if r == ')' || r == ']' {
+				if len(delimiters) == 0 {
 					return nil, false
 				}
+				opening := delimiters[len(delimiters)-1]
+				if r == ')' && opening != '(' || r == ']' && opening != '[' {
+					return nil, false
+				}
+				delimiters = delimiters[:len(delimiters)-1]
 			}
 			add(string(r), false)
 			i += n
@@ -353,7 +357,7 @@ func lex(s string) ([]token, bool) {
 		}
 		return nil, false
 	}
-	return out, depth == 0
+	return out, len(delimiters) == 0
 }
 
 // LexicallyComplete reports whether a bounded SQL fragment has closed literals,

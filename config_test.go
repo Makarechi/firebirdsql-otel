@@ -105,3 +105,21 @@ func TestConnectionFieldPrecedence(t *testing.T) {
 		})
 	}
 }
+
+func TestExplicitPortWithoutHost(t *testing.T) {
+	for _, parse := range []bool{false, true} {
+		attrs := connectionAttributes("user:bad@secret@host/db", ConnectionAttributes{Port: 4000, ParseDSNNetwork: parse})
+		found := false
+		for _, a := range attrs {
+			if string(a.Key) == "server.port" {
+				found = a.Value.AsInt64() == 4000
+			}
+			if string(a.Key) == "server.address" {
+				t.Fatal("ambiguous host exported")
+			}
+		}
+		if !found {
+			t.Fatal("explicit port omitted", attrs)
+		}
+	}
+}
