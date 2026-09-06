@@ -7,6 +7,7 @@ import (
 	"errors"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	"io"
 	"reflect"
 )
 
@@ -96,7 +97,7 @@ func WrapConnector(connector driver.Connector, c Config) (driver.Connector, erro
 	if connector == nil {
 		return nil, errors.New("firebirdotel: nil connector")
 	}
-	if _, ok := connector.(*safeConnector); ok {
+	if _, ok := connector.(interface{ firebirdInstrumentedConnector() }); ok {
 		return nil, errors.New("firebirdotel: connector is already instrumented")
 	}
 	// otelsql has no public unwrapping contract. Reject its known wrappers rather than double wrapping them.
@@ -113,7 +114,11 @@ func WrapConnector(connector driver.Connector, c Config) (driver.Connector, erro
 	if err != nil {
 		return nil, err
 	}
-	return &safeConnector{connector, tel}, nil
+	wrapped := &safeConnector{connector, tel}
+	if closer, ok := connector.(io.Closer); ok {
+		return &closingSafeConnector{safeConnector: wrapped, Closer: closer}, nil
+	}
+	return wrapped, nil
 }
 
 // Raw calls fn with the underlying connection only while database/sql holds it.
@@ -171,4 +176,11 @@ func RegisterDBStatsMetricsWithConfig(db *sql.DB, c Config) (metric.Registration
 		opts = append(opts, WithMeterProvider(c.MeterProvider))
 	}
 	return RegisterDBStatsMetrics(db, "", opts...)
+}
+
+func (*safeConnector) firebirdInstrumentedConnector() {}
+
+type closingSafeConnector struct {
+	*safeConnector
+	io.Closer
 }

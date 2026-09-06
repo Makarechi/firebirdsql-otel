@@ -139,8 +139,9 @@ func (r *Reader) Read(ctx context.Context, scope Scope) (Snapshot, error) {
 	if err != nil {
 		return out, err
 	}
-	query = fmt.Sprintf(`SELECT FIRST %d DISTINCT C.MON$COMPILED_STATEMENT_ID,C.MON$OBJECT_NAME,C.MON$PACKAGE_NAME,C.MON$OBJECT_TYPE FROM MON$COMPILED_STATEMENTS C JOIN MON$STATEMENTS S ON S.MON$COMPILED_STATEMENT_ID=C.MON$COMPILED_STATEMENT_ID WHERE %s ORDER BY C.MON$COMPILED_STATEMENT_ID`, r.maxRows+1, where)
-	err = r.scan(ctx, tx, query, args, &out, func(rows *sql.Rows) error {
+	query = fmt.Sprintf(`SELECT FIRST %d C.MON$COMPILED_STATEMENT_ID,C.MON$OBJECT_NAME,C.MON$PACKAGE_NAME,C.MON$OBJECT_TYPE FROM MON$COMPILED_STATEMENTS C WHERE C.MON$COMPILED_STATEMENT_ID IN (SELECT S.MON$COMPILED_STATEMENT_ID FROM MON$STATEMENTS S WHERE %s UNION SELECT K.MON$COMPILED_STATEMENT_ID FROM MON$CALL_STACK K JOIN MON$STATEMENTS S ON S.MON$STATEMENT_ID=K.MON$STATEMENT_ID WHERE %s) ORDER BY C.MON$COMPILED_STATEMENT_ID`, r.maxRows+1, where, where)
+	compiledArgs := append(append([]any(nil), args...), args...)
+	err = r.scan(ctx, tx, query, compiledArgs, &out, func(rows *sql.Rows) error {
 		var x CompiledStatement
 		var name, pkg sql.NullString
 		if err := rows.Scan(&x.ID, &name, &pkg, &x.ObjectType); err != nil {
