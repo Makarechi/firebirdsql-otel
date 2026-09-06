@@ -39,8 +39,8 @@ jobs:
       # Run packages sequentially to avoid cross-process server lock waits.
       - run: go test -race -p 1 ./...
       - run: go vet ./...
-      - run: go test ./internal/sqltext -run '^$' -fuzz FuzzAnalyze -fuzztime 5s -parallel 2
-      - run: go test ./internal/traceparse -run '^$' -fuzz FuzzTraceChunks -fuzztime 5s -parallel 2
+      - run: go test ./internal/sqltext -run '^$' -fuzz FuzzAnalyze -fuzztime 50000x -parallel 2
+      - run: go test ./internal/traceparse -run '^$' -fuzz FuzzTraceChunks -fuzztime 50000x -parallel 2
 
   windows-platform:
     runs-on: windows-latest

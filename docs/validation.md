@@ -28,7 +28,8 @@ The `-p 1` flag runs packages sequentially: the MON$ tests and first-use Profile
 setup share one database and can otherwise block each other on server locks.
 Unit tests without a live database do not need this flag.
 
-CI automates the same fixture/worker setup and uses five-second fuzz runs. Fuzzing
+CI automates the same fixture/worker setup and uses 50,000 fuzz iterations per
+target, avoiding short wall-clock deadlines during worker shutdown. Fuzzing
 checks panic safety and size invariants; golden canary tests separately check privacy.
 The generated capability adapters can be reproduced with `go generate ./...`.
 
