@@ -50,6 +50,8 @@ the driver of an already-open pool.
   specific providers. Existing `Open`/`Register` APIs retain their legacy behavior.
 - [Server diagnostics](docs/diagnostics.md): metadata, MON$, Trace and Profiler.
   These are separate opt-in tools; ordinary instrumentation never starts them.
+  [Nested server spans](docs/diagnostics.md#nested-server-spans) connect observed
+  procedure, function and trigger calls to the application's client span.
 
 ## Development
 

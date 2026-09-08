@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -71,8 +72,14 @@ func RunWorker(ctx context.Context, input io.Reader, output io.Writer) error {
 	}
 	cancelled := ctx.Done()
 	stopped := false
+	idle := time.NewTimer(250 * time.Millisecond)
+	defer idle.Stop()
 	for {
 		select {
+		case <-idle.C:
+			if err := emit(parser.FlushFinished()); err != nil {
+				return err
+			}
 		case chunk, ok := <-raw:
 			if !ok {
 				readErr := <-finished
@@ -88,6 +95,7 @@ func RunWorker(ctx context.Context, input io.Reader, output io.Writer) error {
 			if err := emit(parser.Feed(chunk + "\n")); err != nil {
 				return err
 			}
+			idle.Reset(250 * time.Millisecond)
 		case <-cancelled:
 			cancelled = nil
 			if !stopped {

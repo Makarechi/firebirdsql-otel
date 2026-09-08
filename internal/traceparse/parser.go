@@ -22,6 +22,8 @@ type Table struct {
 	Natural, Index, Update, Insert, Delete, Backout, Purge, Expunge int64
 }
 type Event struct {
+	// ScopeToken is an opaque instrumentation marker, never SQL or a context value.
+	ScopeToken                                        string
 	Source, Correlation, Kind, Phase, Name, SQL, Plan string
 	Timestamp                                         string
 	AttachmentID, TransactionID, StatementID          int64
@@ -52,8 +54,9 @@ type Parser struct {
 }
 
 var header = regexp.MustCompile(`^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d+) \([^\r\n]{1,100}\) ([A-Z_ ]{1,80})$`)
-var attachment = regexp.MustCompile(`^\t[^\r\n]+ \(ATT_([0-9]+), [^\r\n]*\)$`)
-var transaction = regexp.MustCompile(`^\t[ \t]*\(TRA_([0-9]+), [^\r\n]*\)$`)
+var attachment = regexp.MustCompile(`^\t[^\r\n]+ \(ATT_([0-9]+), [^\r\n]*\)[ \t]*$`)
+var transaction = regexp.MustCompile(`^\t[ \t]*\(TRA_([0-9]+), [^\r\n]*\)[ \t]*$`)
+var scopeMarker = regexp.MustCompile(`^SELECT 1 FROM RDB\$DATABASE /\*firebirdotel_scope:([0-9a-f]{32})\*/$`)
 var statement = regexp.MustCompile(`^Statement ([0-9]+):$`)
 var parameter = regexp.MustCompile(`^param[0-9]+ = [^,\r\n]+, "`)
 var fetched = regexp.MustCompile(`^[0-9]+ records fetched$`)
@@ -114,6 +117,21 @@ func (p *Parser) Flush() []Event {
 		out = append(out, p.Gap())
 	}
 	return out
+}
+
+// FlushFinished releases a finished execution during an idle stream, without
+// interpreting an unterminated SQL body as a complete record. A trailing table
+// section could still arrive, so its counters are conservatively incomplete.
+func (p *Parser) FlushFinished() []Event {
+	if p.line != "" || p.current == nil || p.current.Phase != "finish" || !p.performanceSection || p.collectSQL {
+		return nil
+	}
+	e := p.finish()
+	if e == nil {
+		return nil
+	}
+	e.Incomplete = true
+	return []Event{*e}
 }
 func (p *Parser) consume(line string) []Event {
 	if p.collectSQL {
@@ -308,6 +326,9 @@ func (p *Parser) finish() *Event {
 	p.current = nil
 	if p.sql.Len() > 0 {
 		raw := p.sql.String()
+		if m := scopeMarker.FindStringSubmatch(strings.TrimSpace(raw)); e.Kind == "statement" && m != nil {
+			e.ScopeToken = m[1]
+		}
 		if sqltext.HasTerminalEllipsis(raw) {
 			e.Incomplete = true
 		} else {

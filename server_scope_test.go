@@ -1,0 +1,152 @@
+package firebirdotel
+
+import (
+	"context"
+	"database/sql/driver"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+
+	servertrace "github.com/Makarechi/firebirdsql-otel/trace"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	otrace "go.opentelemetry.io/otel/trace"
+)
+
+type markerConn struct {
+	markerErr, businessErr               error
+	markers, businessCalls, markerCloses int
+}
+
+func (*markerConn) Prepare(string) (driver.Stmt, error) { return nil, driver.ErrSkip }
+func (c *markerConn) PrepareContext(_ context.Context, q string) (driver.Stmt, error) {
+	return &markerStmt{conn: c, query: q}, nil
+}
+
+type markerStmt struct {
+	conn  *markerConn
+	query string
+}
+
+func (s *markerStmt) Close() error                             { s.conn.markerCloses++; return nil }
+func (*markerStmt) NumInput() int                              { return 0 }
+func (*markerStmt) Exec([]driver.Value) (driver.Result, error) { return nil, driver.ErrSkip }
+func (s *markerStmt) Query([]driver.Value) (driver.Rows, error) {
+	return s.QueryContext(context.Background(), nil)
+}
+func (s *markerStmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
+	return s.conn.QueryContext(ctx, s.query, args)
+}
+func (*markerConn) Close() error              { return nil }
+func (*markerConn) Begin() (driver.Tx, error) { return nil, driver.ErrSkip }
+func (c *markerConn) ExecContext(context.Context, string, []driver.NamedValue) (driver.Result, error) {
+	c.businessCalls++
+	return driver.RowsAffected(1), c.businessErr
+}
+func (c *markerConn) QueryContext(_ context.Context, q string, args []driver.NamedValue) (driver.Rows, error) {
+	if !strings.HasPrefix(q, scopeSQL) || !strings.HasSuffix(q, "*/") || len(args) != 0 {
+		return nil, errors.New("unexpected diagnostic SQL")
+	}
+	c.markers++
+	if c.markerErr != nil {
+		return nil, c.markerErr
+	}
+	return &markerRows{}, nil
+}
+
+type markerRows struct{ read bool }
+
+func (*markerRows) Columns() []string { return []string{"result"} }
+func (*markerRows) Close() error      { return nil }
+func (r *markerRows) Next(v []driver.Value) error {
+	if r.read {
+		return io.EOF
+	}
+	r.read = true
+	v[0] = int64(1)
+	return nil
+}
+
+func TestServerMarkersPreserveClientBehavior(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix supervised worker")
+	}
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	defer tp.Shutdown(context.Background())
+	server, err := servertrace.NewSpans(servertrace.SpanConfig{TracerProvider: tp})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := filepath.Join(t.TempDir(), "worker")
+	if err := os.WriteFile(worker, []byte("#!/bin/sh\ntrap 'exit 0' INT TERM\nprintf '%s\\n' '{\"Kind\":\"lifecycle\",\"Phase\":\"ready\"}'\nwhile :; do sleep 0.05; done\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := server.Start(ctx, servertrace.Config{Executable: worker, Address: "localhost", User: "synthetic", Database: "/db", Name: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		stop, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := server.Shutdown(stop); err != nil {
+			t.Error(err)
+		}
+	}()
+	for _, mode := range []string{"enabled", "disabled", "filtered", "unsampled", "marker_failure", "fallback", "overlapping_cursor"} {
+		t.Run(mode, func(t *testing.T) {
+			c := SafeConfig()
+			c.TracerProvider = tp
+			c.ServerTrace = server
+			wantMarkers := 1
+			if mode == "disabled" {
+				c.ServerTrace = nil
+				wantMarkers = 0
+			}
+			if mode == "filtered" {
+				c.Client.Filter = func(context.Context, Operation) bool { return false }
+				wantMarkers = 0
+			}
+			parent, _ := otrace.TraceIDFromHex("11111111111111111111111111111111")
+			parentSpan, _ := otrace.SpanIDFromHex("2222222222222222")
+			flags := otrace.FlagsSampled
+			if mode == "unsampled" {
+				flags = 0
+				wantMarkers = 0
+			}
+			ctx := otrace.ContextWithSpanContext(context.Background(), otrace.NewSpanContext(otrace.SpanContextConfig{TraceID: parent, SpanID: parentSpan, TraceFlags: flags}))
+			businessErr := errors.New("business failure")
+			raw := &markerConn{businessErr: businessErr}
+			if mode == "marker_failure" {
+				raw.markerErr = errors.New("SECRET_CANARY")
+			}
+			if mode == "fallback" {
+				raw.businessErr = driver.ErrSkip
+			}
+			tel, err := newTelemetry(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			conn := &connState{raw: raw, t: tel}
+			if mode == "overlapping_cursor" {
+				conn.serverRows = 1
+				conn.serverToken = server.Register(otrace.SpanContextFromContext(ctx))
+				wantMarkers = 0
+			}
+			before := len(recorder.Ended())
+			_, err = conn.ExecContext(ctx, "execute procedure P(?)", []driver.NamedValue{{Ordinal: 1, Value: 1}})
+			if err != raw.businessErr || raw.businessCalls != 1 || raw.markers != wantMarkers || raw.markerCloses != wantMarkers {
+				t.Fatalf("behavior changed: err=%v calls=%d markers=%d", err, raw.businessCalls, raw.markers)
+			}
+			if mode == "fallback" && len(recorder.Ended()) != before {
+				t.Fatal("ErrSkip exported duplicate client span")
+			}
+		})
+	}
+}

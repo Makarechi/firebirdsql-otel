@@ -73,6 +73,94 @@ attachment/statement pair. An empty result returns `ErrStatementNotVisible` and
 unmatched correlation, without extra queries or fabricated idle-state data. Object/attachment identifiers are
 not metric dimensions. Each collection has a bounded row count and a truncation flag.
 
+## Nested server spans
+
+Ordinary client instrumentation observes the outer SQL call. Enable server spans
+explicitly to see procedures, functions, triggers and SQL statements actually
+reported by Firebird Trace beneath that call. Build the isolated worker first:
+
+```sh
+go build -o firebirdotel-trace github.com/Makarechi/firebirdsql-otel/cmd/firebirdotel-trace
+```
+
+```go
+// fbtrace is github.com/Makarechi/firebirdsql-otel/trace.
+server, err := fbtrace.NewSpans(fbtrace.SpanConfig{})
+if err != nil { return err }
+err = server.Start(startupContext, fbtrace.Config{
+    Executable: "/absolute/path/firebirdotel-trace",
+    Address: "localhost:3050", User: diagnosticUser, Password: password,
+    Database: "/var/lib/firebird/data/app.fdb", Name: "billing-primary-diagnostics",
+})
+if err != nil { return err }
+
+cfg := firebirdotel.SafeConfig()
+cfg.ServerTrace = server
+driverName, err := firebirdotel.RegisterWithConfig(cfg)
+if err != nil { return err }
+// Pass driverName to your existing database constructor. It still owns the pool.
+```
+
+`NewSpans` may run before connection configuration is loaded; pass the collector
+configuration to `Start` later, before serving database traffic. `Start` waits for
+readiness, and its context only bounds startup. On shutdown, stop database traffic,
+call `server.Shutdown(shutdownContext)` and close pools, then flush and close the OTel
+providers. Both client and server spans default to the application's global providers.
+A handle that has not been started adds no marker queries. The collector requires
+access to Firebird's Services API and trace permission for the observed attachments.
+
+This opt-in mode runs one extra diagnostic SELECT before an eligible Exec/Query,
+including prepared executions, on the same physical connection. It uses a fixed
+SQL shape, `SELECT 1 FROM RDB$DATABASE`, with a random opaque comment. The token contains
+no trace IDs, business arguments or credentials and is not exported in spans.
+Business SQL and bind values are unchanged. Ordinary mode adds no queries. Filtered
+calls and calls with an unsampled parent do not set a marker; the actual client span's
+sampling decision is checked before server export. Marker failures suppress server
+correlation and preserve the business operation's result/error. Session and
+transaction variables are untouched; collecting business context-variable values
+is not enabled.
+
+Observed output can look like:
+
+```text
+application request
+  EXECUTE PROCEDURE OTEL_OUTER          (client call)
+    EXECUTE PROCEDURE OTEL_OUTER        (server execution)
+      OTEL_OUTER
+        OTEL_NESTED_A
+          OTEL_DOUBLE
+          OTEL_A_CHANGED
+```
+
+The marker selects the client parent without matching names or timing windows.
+Text Trace nesting remains `firebird.correlation=heuristic`; it is not a guarantee
+of complete PSQL coverage. This does not produce a span for every SQL instruction
+inside PSQL. Table counters become span events, not invented timed table spans.
+Server time is aligned to the local marker time and marked
+`firebird.clock.alignment=marker_estimate`; native timestamp differences determine
+duration, without assuming the server's timezone or clock synchronization.
+
+The runtime buffers bounded trees and exports after the outer server execution
+finishes and its client span is known. Defaults: 256 pending operations, two-minute
+retention, 128 events per tree and 4096 tracked events globally. `MaxPending` and
+`Retention` have hard limits of 4096 and five minutes. Gaps, expiration, overflow,
+failed markers, unsampled parents and ambiguous overlapping cursors suppress affected
+trees. Missing matched children mark exported trees `firebird.incomplete=true`.
+`firebird.server.trace.dropped` counts discarded trees by bounded reason. Concurrent
+operations on different connections are independent; overlapping open cursors on one
+connection are deliberately not attributed. Unregistered traffic is never exported.
+Separate runtimes only export their own tokens, even when observing the same database.
+During otherwise idle traffic, the worker releases a parsed finish record after
+250 ms without requiring another application query. Such a record is marked
+incomplete because additional table counters could still arrive; unfinished SQL
+and start records are never finalized by the idle timer.
+
+The worker and server-side privacy/lifecycle boundaries below also apply. Inspect
+collector failures and orphan trace sessions before restarting explicitly; the
+runtime does not reconnect and pretend that the stream stayed complete. Use
+`server.Wait(ctx)` to observe unexpected worker termination; ordinary client
+queries continue and new marker registrations stop after the collector ends.
+
 ## Experimental Trace collector
 
 Build `go build -o firebirdotel-trace ./cmd/firebirdotel-trace`, then explicitly start:
@@ -147,6 +235,8 @@ state and mark subsequent records incomplete. Recursion is stack-based. Sequence
 are local to one collector; timestamps retain the server's local text without inventing
 a timezone. Neither a fully observed pair nor the presence of parent IDs proves a
 complete PSQL execution tree. Do not attach server events as exact HTTP children.
+The optional `SpanRuntime` uses a SQL marker for the client parent and retains
+heuristic nesting.
 
 **The supervised collector does not support Windows.** Start returns an error
 matching `errors.ErrUnsupported` before launching a worker on Windows; its interrupt
