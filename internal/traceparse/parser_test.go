@@ -364,3 +364,30 @@ func TestTraceLifecycleAndStatementIdentity(t *testing.T) {
 		t.Fatal("missing statement identity was correlated", events)
 	}
 }
+
+func TestIdleTraceInitAndStackOverflowAreObservable(t *testing.T) {
+	p := New()
+	if events := p.Feed(record("TRACE_INIT", "SESSION started")); len(events) != 0 {
+		t.Fatal("trace init finished before idle flush", events)
+	}
+	events := p.FlushFinished()
+	if len(events) != 1 || events[0].Kind != "lifecycle" || events[0].Phase != "trace_init" || events[0].Incomplete {
+		t.Fatal("idle trace init was not released", events)
+	}
+
+	p = New()
+	var wire strings.Builder
+	for range MaxDepth + 1 {
+		wire.WriteString(record("EXECUTE_PROCEDURE_START", "Procedure P:"))
+	}
+	wire.WriteString(record("TRACE_FINI", ""))
+	events = p.Feed(wire.String())
+	events = append(events, p.Flush()...)
+	foundGap := false
+	for _, event := range events {
+		foundGap = foundGap || event.Kind == "gap"
+	}
+	if !foundGap {
+		t.Fatal("stack overflow did not emit a gap")
+	}
+}

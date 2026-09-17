@@ -54,6 +54,7 @@ type Parser struct {
 	sequence           uint64
 	stacks             map[[2]int64][]frame
 	incomplete         bool
+	stackOverflow      bool
 }
 
 var header = regexp.MustCompile(`^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d+) \([^\r\n]{1,100}\) ([A-Z_ ]{1,80})$`)
@@ -120,17 +121,28 @@ func (p *Parser) Flush() []Event {
 		}
 		out = append(out, *e)
 	}
+	if p.stackOverflow {
+		p.stackOverflow = false
+		out = append(out, p.Gap())
+	}
 	if len(p.stacks) > 0 {
 		out = append(out, p.Gap())
 	}
 	return out
 }
 
-// FlushFinished releases a finished execution during an idle stream, without
-// interpreting an unterminated SQL body as a complete record. A trailing table
-// section could still arrive, so its counters are conservatively incomplete.
+// FlushFinished releases TRACE_INIT or a finished execution during an idle
+// stream, without interpreting an unterminated SQL body as a complete record.
+// A trailing table section could still arrive, so execution counters are
+// conservatively incomplete.
 func (p *Parser) FlushFinished() []Event {
-	if p.line != "" || p.current == nil || p.current.Phase != "finish" || !p.performanceSection || p.collectSQL {
+	if p.line != "" || p.current == nil || p.collectSQL {
+		return nil
+	}
+	if p.current.Kind == "lifecycle" && p.current.Phase == "trace_init" {
+		return []Event{*p.finish()}
+	}
+	if p.current.Phase != "finish" || !p.performanceSection {
 		return nil
 	}
 	e := p.finish()
@@ -138,7 +150,12 @@ func (p *Parser) FlushFinished() []Event {
 		return nil
 	}
 	e.Incomplete = true
-	return []Event{*e}
+	out := []Event{*e}
+	if p.stackOverflow {
+		p.stackOverflow = false
+		out = append(out, p.Gap())
+	}
+	return out
 }
 func (p *Parser) consume(line string) []Event {
 	if p.collectSQL {
@@ -166,6 +183,10 @@ func (p *Parser) consume(line string) []Event {
 		out := []Event{}
 		if e := p.finish(); e != nil {
 			out = append(out, *e)
+		}
+		if p.stackOverflow {
+			p.stackOverflow = false
+			out = append(out, p.Gap())
 		}
 		kind, phase := "", ""
 		switch strings.TrimSpace(m[2]) {
@@ -391,6 +412,7 @@ func (p *Parser) finish() *Event {
 		if len(p.stacks) >= MaxScopes && len(stack) == 0 || len(stack) >= MaxDepth {
 			p.incomplete = true
 			clear(p.stacks)
+			p.stackOverflow = true
 			stack = nil
 			e.Incomplete = true
 		}
