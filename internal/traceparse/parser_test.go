@@ -334,6 +334,16 @@ func TestTraceSectionsRemainDistinctFromSQL(t *testing.T) {
 			t.Fatal("delimited DDL counters were lost", events)
 		}
 	})
+
+	t.Run("legacy declare performance", func(t *testing.T) {
+		p := New()
+		sql := "DECLARE FILTER F INPUT_TYPE 1 OUTPUT_TYPE 2"
+		wire := record("EXECUTE_STATEMENT_START", "Statement 1:\n---\n"+sql+"\n      8 ms, 3 write(s)") + record("TRACE_FINI", "")
+		events := p.Feed(wire)
+		if len(events) != 1 || events[0].SQL != "DECLARE FILTER F INPUT_TYPE ? OUTPUT_TYPE ?" || events[0].DurationMS != 8 || events[0].Writes != 3 || events[0].Incomplete {
+			t.Fatal("DECLARE counters were lost", events)
+		}
+	})
 }
 
 func TestTraceOutputPreservesBoundedMetadata(t *testing.T) {

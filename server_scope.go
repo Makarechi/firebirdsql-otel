@@ -15,20 +15,35 @@ type markerCompletion interface {
 	MarkerComplete(string)
 }
 
-func (c *connState) serverScope(op *operation) {
+func (c *connState) serverScope(op *operation, allowFallback bool) {
 	s := c.t.c.ServerTrace
 	if s == nil {
 		return
 	}
 	c.txMu.Lock()
-	if c.serverRows > 0 {
-		// A suspended selectable procedure and another operation on one attachment
-		// cannot be ordered reliably by text Trace. Invalidate, never guess.
-		s.Discard(c.serverToken)
+	if allowFallback && c.fallbackToken != "" {
+		op.serverToken = c.fallbackToken
+		c.fallbackToken = ""
 		c.txMu.Unlock()
 		return
 	}
+	staleFallback := c.fallbackToken
+	c.fallbackToken = ""
+	if c.serverRows > 0 {
+		// A suspended selectable procedure and another operation on one attachment
+		// cannot be ordered reliably by text Trace. Invalidate, never guess.
+		current := c.serverToken
+		s.Discard(current)
+		c.txMu.Unlock()
+		if staleFallback != "" && staleFallback != current {
+			s.Discard(staleFallback)
+		}
+		return
+	}
 	c.txMu.Unlock()
+	if staleFallback != "" {
+		s.Discard(staleFallback)
+	}
 	if !op.enabled {
 		return
 	}
@@ -87,6 +102,34 @@ func (c *connState) serverScope(op *operation) {
 	c.txMu.Lock()
 	c.serverToken = token
 	c.txMu.Unlock()
+}
+
+func (c *connState) preserveFallbackToken(op *operation, err error) {
+	if err != driver.ErrSkip || op.serverToken == "" {
+		return
+	}
+	token := op.serverToken
+	c.txMu.Lock()
+	stale := c.fallbackToken
+	c.fallbackToken = token
+	op.serverToken = ""
+	c.txMu.Unlock()
+	if stale != "" && stale != token {
+		c.t.c.ServerTrace.Discard(stale)
+	}
+}
+
+func (c *connState) discardFallbackToken() {
+	if c.t.c.ServerTrace == nil {
+		return
+	}
+	c.txMu.Lock()
+	token := c.fallbackToken
+	c.fallbackToken = ""
+	c.txMu.Unlock()
+	if token != "" {
+		c.t.c.ServerTrace.Discard(token)
+	}
 }
 
 func (c *connState) queryResult(op operation, r driver.Rows, err error) (driver.Rows, error) {

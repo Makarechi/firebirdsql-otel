@@ -188,7 +188,7 @@ func analyze(sql string, inputLimit, outputLimit int, quotedIdentifiers bool) De
 }
 func isOperation(s string) bool {
 	switch s {
-	case "SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "EXECUTE", "CREATE", "ALTER", "DROP", "RECREATE", "GRANT", "REVOKE", "COMMENT", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE", "SET":
+	case "SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "EXECUTE", "CREATE", "ALTER", "DROP", "RECREATE", "DECLARE", "GRANT", "REVOKE", "COMMENT", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE", "SET":
 		return true
 	}
 	return false

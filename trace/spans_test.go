@@ -225,10 +225,15 @@ func TestPendingMarkerWaitsForRootStatement(t *testing.T) {
 	trigger := base
 	trigger.Kind, trigger.Name, trigger.Phase, trigger.Sequence = "trigger", "ON_COMMIT", "start", 1
 	r.events <- trigger
+	autonomous := base
+	autonomous.Kind, autonomous.Name, autonomous.Phase, autonomous.Sequence = "statement", "SELECT AUTONOMOUS", "start", 2
+	r.events <- autonomous
+	autonomous.Phase, autonomous.Timestamp = "finish", "2026-09-17T08:00:00.0005"
+	r.events <- autonomous
 	trigger.Phase, trigger.Timestamp = "finish", "2026-09-17T08:00:00.0010"
 	r.events <- trigger
 	statement := base
-	statement.Kind, statement.Name, statement.Phase, statement.Sequence = "statement", "SELECT T", "start", 2
+	statement.Kind, statement.Name, statement.Phase, statement.Sequence = "statement", "SELECT T", "start", 3
 	r.events <- statement
 	statement.Phase, statement.Timestamp = "finish", "2026-09-17T08:00:00.0020"
 	r.events <- statement

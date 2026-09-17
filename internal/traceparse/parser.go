@@ -450,7 +450,7 @@ func (p *Parser) finish() *Event {
 
 func terminalPerformanceOperation(raw string) bool {
 	switch sqltext.LeadingOperation(raw) {
-	case "CREATE", "ALTER", "DROP", "RECREATE", "GRANT", "REVOKE", "COMMENT", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE", "SET", "EXECUTE BLOCK", "EXECUTE PROCEDURE":
+	case "CREATE", "ALTER", "DROP", "RECREATE", "DECLARE", "GRANT", "REVOKE", "COMMENT", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE", "SET", "EXECUTE BLOCK", "EXECUTE PROCEDURE":
 		return true
 	default:
 		return false

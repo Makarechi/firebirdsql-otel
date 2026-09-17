@@ -59,6 +59,7 @@ func FuzzAnalyze(f *testing.F) {
 func TestUnknownDialectOmitsAmbiguousDescription(t *testing.T) {
 	for _, tt := range []struct{ sql, operation string }{
 		{`CREATE TABLE "Order Items" (ID INTEGER)`, "CREATE"},
+		{`DECLARE FILTER F INPUT_TYPE 1 OUTPUT_TYPE 2`, "DECLARE"},
 		{`EXECUTE PROCEDURE "Quoted Procedure"`, "EXECUTE PROCEDURE"},
 		{"WITH X AS (SELECT 1 FROM T) SELECT * FROM X", "SELECT"},
 	} {

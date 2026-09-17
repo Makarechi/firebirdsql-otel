@@ -277,6 +277,8 @@ func (s *SpanRuntime) consume(r *Runtime) {
 	})
 	frames := make(map[uint64]*serverTree)
 	trees := make(map[*serverTree]bool)
+	active := make(map[uint64]int64)
+	activeByAttachment := make(map[int64]int)
 	drop := func(tree *serverTree, reason string) {
 		for seq := range tree.bySequence {
 			delete(frames, seq)
@@ -293,6 +295,8 @@ func (s *SpanRuntime) consume(r *Runtime) {
 			s.Discard(p.token)
 		}
 		clear(pending)
+		clear(active)
+		clear(activeByAttachment)
 	}
 	flush := func() {
 		for tree := range trees {
@@ -367,12 +371,16 @@ func (s *SpanRuntime) consume(r *Runtime) {
 			}
 			if e.Phase == "start" {
 				tree := frames[e.ParentSequence]
-				if p, ok := pending[e.AttachmentID]; ok && e.Kind == "statement" && e.ParentSequence == 0 {
+				if p, ok := pending[e.AttachmentID]; ok && e.Kind == "statement" && e.ParentSequence == 0 && activeByAttachment[e.AttachmentID] == 0 {
 					delete(pending, e.AttachmentID)
 					if sc, valid := s.lookup(p.token); valid {
 						tree = &serverTree{token: p.token, scope: sc, anchor: p.anchor, bySequence: make(map[uint64]*serverNode)}
 						trees[tree] = true
 					}
+				}
+				if e.AttachmentID > 0 {
+					active[e.Sequence] = e.AttachmentID
+					activeByAttachment[e.AttachmentID]++
 				}
 				if tree == nil {
 					continue
@@ -390,6 +398,13 @@ func (s *SpanRuntime) consume(r *Runtime) {
 				tree.bySequence[e.Sequence] = n
 				frames[e.Sequence] = tree
 			} else if e.Phase == "finish" {
+				if attachmentID, ok := active[e.Sequence]; ok {
+					delete(active, e.Sequence)
+					activeByAttachment[attachmentID]--
+					if activeByAttachment[attachmentID] == 0 {
+						delete(activeByAttachment, attachmentID)
+					}
+				}
 				tree := frames[e.Sequence]
 				if tree == nil {
 					continue

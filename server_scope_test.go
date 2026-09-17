@@ -57,6 +57,20 @@ func (c *markerConn) QueryContext(_ context.Context, q string, args []driver.Nam
 
 type markerRows struct{ read bool }
 
+type fallbackExecStmt struct{ calls int }
+
+func (*fallbackExecStmt) Close() error  { return nil }
+func (*fallbackExecStmt) NumInput() int { return -1 }
+func (s *fallbackExecStmt) Exec([]driver.Value) (driver.Result, error) {
+	s.calls++
+	return driver.RowsAffected(1), nil
+}
+func (*fallbackExecStmt) Query([]driver.Value) (driver.Rows, error) { return nil, driver.ErrSkip }
+func (s *fallbackExecStmt) ExecContext(context.Context, []driver.NamedValue) (driver.Result, error) {
+	s.calls++
+	return driver.RowsAffected(1), nil
+}
+
 func (*markerRows) Columns() []string { return []string{"result"} }
 func (*markerRows) Close() error      { return nil }
 func (r *markerRows) Next(v []driver.Value) error {
@@ -177,5 +191,33 @@ func TestServerScopeUsesMarkerCompletionAndDiscardsFailedCalls(t *testing.T) {
 				t.Fatal("successful business call was not bound", server)
 			}
 		})
+	}
+}
+
+func TestServerScopeReusesMarkerAfterErrSkip(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	defer tp.Shutdown(context.Background())
+	server := &trackingMarkerTrace{}
+	cfg := SafeConfig()
+	cfg.TracerProvider = tp
+	cfg.ServerTrace = server
+	tel, err := newTelemetry(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := &markerConn{businessErr: driver.ErrSkip}
+	conn := &connState{raw: raw, t: tel}
+	query := "execute procedure P(?)"
+	if _, err := conn.ExecContext(t.Context(), query, []driver.NamedValue{{Ordinal: 1, Value: 1}}); err != driver.ErrSkip {
+		t.Fatal("fast path did not return ErrSkip", err)
+	}
+	stmt := &fallbackExecStmt{}
+	wrapped := &stmtState{raw: stmt, t: tel, d: tel.describe(query), conn: conn}
+	if _, err := wrapped.ExecContext(t.Context(), []driver.NamedValue{{Ordinal: 1, Value: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if raw.markers != 1 || stmt.calls != 1 || server.completed != 1 || server.bound != 1 || server.discarded != 0 {
+		t.Fatalf("marker was not reused: markers=%d calls=%d completed=%d bound=%d discarded=%d", raw.markers, stmt.calls, server.completed, server.bound, server.discarded)
 	}
 }
