@@ -25,8 +25,9 @@ type SpanConfig struct {
 }
 
 type scope struct {
-	parent  otrace.SpanContext
-	started time.Time
+	parent          otrace.SpanContext
+	registered      time.Time
+	markerCompleted time.Time
 }
 
 // SpanRuntime converts completed server execution trees into child spans.
@@ -152,7 +153,7 @@ func (s *SpanRuntime) Register(parent otrace.SpanContext) string {
 		return ""
 	}
 	for k, v := range s.registrations {
-		if now.Sub(v.started) > s.c.Retention {
+		if now.Sub(v.registered) > s.c.Retention {
 			delete(s.registrations, k)
 		}
 	}
@@ -160,8 +161,19 @@ func (s *SpanRuntime) Register(parent otrace.SpanContext) string {
 		return ""
 	}
 	token := hex.EncodeToString(bytes[:])
-	s.registrations[token] = scope{started: now}
+	s.registrations[token] = scope{registered: now}
 	return token
+}
+
+// MarkerComplete records the local completion of the marker query. The driver
+// calls it immediately before submitting the business statement.
+func (s *SpanRuntime) MarkerComplete(token string) {
+	s.mu.Lock()
+	if v, ok := s.registrations[token]; ok {
+		v.markerCompleted = time.Now()
+		s.registrations[token] = v
+	}
+	s.mu.Unlock()
 }
 
 // Bind supplies the actual client span after driver execution. This preserves
@@ -194,7 +206,7 @@ func (s *SpanRuntime) lookup(token string) (scope, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	v, ok := s.registrations[token]
-	if ok && time.Since(v.started) > s.c.Retention {
+	if ok && time.Since(v.registered) > s.c.Retention {
 		delete(s.registrations, token)
 		return scope{}, false
 	}
@@ -408,7 +420,8 @@ func (s *SpanRuntime) exportTree(tree *serverTree) {
 			attribute.String("firebird.clock.alignment", "marker_estimate"), attribute.String("firebird.server.kind", n.start.Kind),
 			attribute.Bool("firebird.incomplete", incomplete),
 			attribute.Int64("firebird.server.duration_ms", n.finish.DurationMS),
-			attribute.Int64("firebird.pages.read", n.finish.Reads), attribute.Int64("firebird.pages.fetch", n.finish.Fetches),
+			attribute.Int64("firebird.pages.read", n.finish.Reads), attribute.Int64("firebird.pages.write", n.finish.Writes),
+			attribute.Int64("firebird.pages.fetch", n.finish.Fetches), attribute.Int64("firebird.pages.mark", n.finish.Marks),
 		}
 		if n.start.Kind == "procedure" {
 			attrs = append(attrs, attribute.String("db.stored_procedure.name", n.start.Name))
@@ -421,11 +434,15 @@ func (s *SpanRuntime) exportTree(tree *serverTree) {
 			name = n.start.Kind
 		}
 		ctx := otrace.ContextWithSpanContext(context.Background(), parent)
-		_, span := s.tracer.Start(ctx, name, otrace.WithSpanKind(otrace.SpanKindInternal), otrace.WithTimestamp(tree.scope.started.Add(start.Sub(tree.anchor))), otrace.WithAttributes(attrs...))
+		localAnchor := tree.scope.markerCompleted
+		if localAnchor.IsZero() {
+			localAnchor = tree.scope.registered
+		}
+		_, span := s.tracer.Start(ctx, name, otrace.WithSpanKind(otrace.SpanKindInternal), otrace.WithTimestamp(localAnchor.Add(start.Sub(tree.anchor))), otrace.WithAttributes(attrs...))
 		parents[n.start.Sequence] = span.SpanContext()
 		for _, table := range n.finish.Tables {
-			span.AddEvent("firebird.table", otrace.WithTimestamp(tree.scope.started.Add(end.Sub(tree.anchor))), otrace.WithAttributes(attribute.String("db.collection.name", table.Name), attribute.Int64("firebird.rows.read.natural", table.Natural), attribute.Int64("firebird.rows.read.index", table.Index), attribute.Int64("firebird.rows.updated", table.Update), attribute.Int64("firebird.rows.inserted", table.Insert), attribute.Int64("firebird.rows.deleted", table.Delete)))
+			span.AddEvent("firebird.table", otrace.WithTimestamp(localAnchor.Add(end.Sub(tree.anchor))), otrace.WithAttributes(attribute.String("db.collection.name", table.Name), attribute.Int64("firebird.rows.read.natural", table.Natural), attribute.Int64("firebird.rows.read.index", table.Index), attribute.Int64("firebird.rows.updated", table.Update), attribute.Int64("firebird.rows.inserted", table.Insert), attribute.Int64("firebird.rows.deleted", table.Delete), attribute.Int64("firebird.rows.backout", table.Backout), attribute.Int64("firebird.rows.purge", table.Purge), attribute.Int64("firebird.rows.expunge", table.Expunge)))
 		}
-		span.End(otrace.WithTimestamp(tree.scope.started.Add(end.Sub(tree.anchor))))
+		span.End(otrace.WithTimestamp(localAnchor.Add(end.Sub(tree.anchor))))
 	}
 }

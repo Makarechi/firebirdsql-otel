@@ -72,6 +72,9 @@ func Start(ctx context.Context, c Config) (*Runtime, error) {
 	if len(c.Address) > 512 || len(c.User) > 256 || len(c.Password) > 4096 || len(c.Database) > 1024 || len(c.Name) > 128 {
 		return nil, errors.New("trace: configuration limits exceeded")
 	}
+	if !utf8.ValidString(c.Address) || !utf8.ValidString(c.User) || !utf8.ValidString(c.Password) || !utf8.ValidString(c.Database) || !utf8.ValidString(c.Name) {
+		return nil, errors.New("trace: invalid configuration encoding")
+	}
 	if strings.ContainsAny(c.Name, "\r\n") {
 		return nil, errors.New("trace: invalid session name")
 	}
@@ -170,6 +173,8 @@ func (r *Runtime) run(ctx context.Context) {
 				emit(parser.Flush())
 				return
 			}
+			// WaitStringsContext uses Firebird's isc_info_svc_line API and returns
+			// one line without its delimiter. Restore that documented delimiter.
 			if !emit(parser.Feed(chunk + "\n")) {
 				r.finish(nil)
 				return

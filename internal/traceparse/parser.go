@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 const MaxRecord = 65536
@@ -28,7 +30,7 @@ type Event struct {
 	Timestamp                                         string
 	AttachmentID, TransactionID, StatementID          int64
 	Sequence, ParentSequence                          uint64
-	DurationMS, Reads, Fetches, Marks                 int64
+	DurationMS, Reads, Writes, Fetches, Marks         int64
 	Tables                                            []Table
 	Incomplete                                        bool
 }
@@ -43,6 +45,7 @@ type Parser struct {
 	current            *Event
 	sql                strings.Builder
 	collectSQL         bool
+	sqlSeparated       bool
 	metadataHeader     bool
 	planSection        bool
 	performanceSection bool
@@ -60,8 +63,9 @@ var scopeMarker = regexp.MustCompile(`^SELECT 1 FROM RDB\$DATABASE /\*firebirdot
 var statement = regexp.MustCompile(`^Statement ([0-9]+):$`)
 var parameter = regexp.MustCompile(`^param[0-9]+ = [^,\r\n]+, "`)
 var fetched = regexp.MustCompile(`^[0-9]+ records fetched$`)
+var affected = regexp.MustCompile(`^[0-9]+ records affected$`)
 var performanceLine = regexp.MustCompile(`^[0-9]+ ms(?:, [0-9]+ (?:read\(s\)|write\(s\)|fetch\(es\)|mark\(s\)))*$`)
-var perf = regexp.MustCompile(`([0-9]+) (ms|read\(s\)|fetch\(es\)|mark\(s\))`)
+var perf = regexp.MustCompile(`([0-9]+) (ms|read\(s\)|write\(s\)|fetch\(es\)|mark\(s\))`)
 
 func New() *Parser { return &Parser{stacks: make(map[[2]int64][]frame)} }
 func (p *Parser) Gap() Event {
@@ -70,6 +74,7 @@ func (p *Parser) Gap() Event {
 	p.current = nil
 	p.sql.Reset()
 	p.collectSQL = false
+	p.sqlSeparated = false
 	return Event{Source: "trace", Correlation: "unmatched", Kind: "gap", Incomplete: true}
 }
 
@@ -110,7 +115,9 @@ func (p *Parser) Flush() []Event {
 	}
 	p.line = ""
 	if e := p.finish(); e != nil {
-		e.Incomplete = true
+		if e.Kind != "lifecycle" || e.Phase != "trace_fini" {
+			e.Incomplete = true
+		}
 		out = append(out, *e)
 	}
 	if len(p.stacks) > 0 {
@@ -136,7 +143,9 @@ func (p *Parser) FlushFinished() []Event {
 func (p *Parser) consume(line string) []Event {
 	if p.collectSQL {
 		trim := strings.TrimSpace(line)
-		boundary := header.MatchString(line) || strings.HasPrefix(trim, "^^^") || parameter.MatchString(line) || fetched.MatchString(trim)
+		complete := sqltext.LexicallyComplete(p.sql.String())
+		performanceBoundary := performanceLine.MatchString(trim) && terminalPerformanceOperation(p.sql.String())
+		boundary := header.MatchString(line) || strings.HasPrefix(trim, "^^^") || p.sqlSeparated && parameter.MatchString(line) || fetched.MatchString(trim) || affected.MatchString(trim) || performanceBoundary
 		if !boundary || !sqltext.LexicallyComplete(p.sql.String()) {
 			p.recordBytes += len(line) + 1
 			if p.recordBytes > MaxRecord || p.sql.Len()+len(line)+1 > MaxRecord {
@@ -144,9 +153,11 @@ func (p *Parser) consume(line string) []Event {
 			}
 			p.sql.WriteString(line)
 			p.sql.WriteByte('\n')
+			p.sqlSeparated = trim == "" && complete
 			return nil
 		}
 		p.collectSQL = false
+		p.sqlSeparated = false
 	}
 
 	if m := header.FindStringSubmatch(line); m != nil {
@@ -235,6 +246,7 @@ func (p *Parser) consume(line string) []Event {
 	}
 	if strings.HasPrefix(trim, "---") {
 		p.collectSQL = true
+		p.sqlSeparated = false
 		p.metadataHeader = false
 		return nil
 	}
@@ -248,8 +260,14 @@ func (p *Parser) consume(line string) []Event {
 	}
 	if p.planSection && strings.HasPrefix(trim, "PLAN ") {
 		d := sqltext.AnalyzeUnknownDialect(trim, 0, 0)
-		if d.Valid {
-			e.Plan = d.Text
+		if d.Valid && d.Text != "" {
+			if e.Plan == "" {
+				e.Plan = d.Text
+			} else if len(e.Plan)+1+len(d.Text) <= sqltext.MaxOutput {
+				e.Plan += "\n" + d.Text
+			} else {
+				e.Incomplete = true
+			}
 		} else {
 			e.Incomplete = true
 		}
@@ -263,7 +281,7 @@ func (p *Parser) consume(line string) []Event {
 	}
 	if p.tableWidth >= 32 && len(line) >= p.tableWidth+80 && !strings.HasPrefix(line, "***") {
 		name := strings.TrimSpace(line[:p.tableWidth])
-		if sqltext.Identifier(name) {
+		if metadataName(name) {
 			table := Table{Name: name}
 			values := []*int64{&table.Natural, &table.Index, &table.Update, &table.Insert, &table.Delete, &table.Backout, &table.Purge, &table.Expunge}
 			valid := true
@@ -283,10 +301,12 @@ func (p *Parser) consume(line string) []Event {
 			} else {
 				e.Incomplete = true
 			}
+		} else {
+			e.Incomplete = true
 		}
 		return nil
 	}
-	if parameter.MatchString(line) || trim == "returns:" || fetched.MatchString(trim) {
+	if parameter.MatchString(line) || trim == "returns:" || fetched.MatchString(trim) || affected.MatchString(trim) {
 		p.collectSQL = false
 		return nil
 	}
@@ -300,6 +320,8 @@ func (p *Parser) consume(line string) []Event {
 				e.DurationMS = v
 			case "read(s)":
 				e.Reads = v
+			case "write(s)":
+				e.Writes = v
 			case "fetch(es)":
 				e.Fetches = v
 			case "mark(s)":
@@ -337,7 +359,7 @@ func (p *Parser) finish() *Event {
 			if e.Kind == "statement" {
 				e.Name = d.Summary
 			}
-			if !d.Valid {
+			if !d.Valid || strings.TrimSpace(raw) != "" && d.Text == "" {
 				e.Incomplete = true
 			}
 		}
@@ -355,6 +377,13 @@ func (p *Parser) finish() *Event {
 		e.Correlation = "unmatched"
 		return e
 	}
+	if e.Kind == "statement" && e.StatementID == 0 {
+		e.Incomplete = true
+		e.Correlation = "unmatched"
+		p.incomplete = true
+		delete(p.stacks, key)
+		return e
+	}
 	if e.Phase == "start" {
 		if len(p.stacks) >= MaxScopes && len(stack) == 0 || len(stack) >= MaxDepth {
 			p.incomplete = true
@@ -370,7 +399,7 @@ func (p *Parser) finish() *Event {
 		p.stacks[key] = append(stack, frame{e.Kind, e.Name, e.Sequence, e.StatementID})
 	} else if len(stack) > 0 {
 		last := stack[len(stack)-1]
-		if last.kind == e.Kind && last.name == e.Name && (e.StatementID == 0 || last.statement == e.StatementID) {
+		if last.kind == e.Kind && last.name == e.Name && last.statement == e.StatementID {
 			e.Sequence = last.sequence
 			stack = stack[:len(stack)-1]
 			if len(stack) > 0 {
@@ -392,6 +421,28 @@ func (p *Parser) finish() *Event {
 	}
 	e.Incomplete = e.Incomplete || p.incomplete
 	return e
+}
+
+func terminalPerformanceOperation(raw string) bool {
+	d := sqltext.AnalyzeUnknownDialect(raw, 0, 0)
+	switch d.Operation {
+	case "CREATE", "ALTER", "DROP", "RECREATE", "GRANT", "REVOKE", "COMMENT", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE", "SET", "EXECUTE BLOCK":
+		return d.Valid
+	default:
+		return false
+	}
+}
+
+func metadataName(s string) bool {
+	if s == "" || len(s) > 256 || !utf8.ValidString(s) {
+		return false
+	}
+	for _, r := range s {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
 }
 
 // The relation separator is syntax only outside a quoted trigger identifier.

@@ -11,6 +11,10 @@ import (
 // It never changes application SQL, bind values, or session/transaction variables.
 const scopeSQL = "SELECT 1 FROM RDB$DATABASE /*firebirdotel_scope:"
 
+type markerCompletion interface {
+	MarkerComplete(string)
+}
+
 func (c *connState) serverScope(op *operation) {
 	s := c.t.c.ServerTrace
 	if s == nil {
@@ -75,6 +79,9 @@ func (c *connState) serverScope(op *operation) {
 	if err != nil {
 		s.Discard(token)
 		return
+	}
+	if completed, ok := s.(markerCompletion); ok {
+		completed.MarkerComplete(token)
 	}
 	op.serverToken = token
 	c.txMu.Lock()

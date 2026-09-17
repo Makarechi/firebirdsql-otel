@@ -182,6 +182,9 @@ func TestRuntimeConfigurationValidation(t *testing.T) {
 		{Address: "localhost", User: "test", Database: "/bad\npath", Name: "test"},
 		{Address: "localhost", User: "test", Database: "/db", Name: "test", Buffer: 257},
 		{Address: "localhost", User: strings.Repeat("x", 257), Database: "/db", Name: "test"},
+		{Address: "localhost", User: string([]byte{0xff}), Database: "/db", Name: "test"},
+		{Address: "localhost", User: "test", Password: string([]byte{0xff}), Database: "/db", Name: "test"},
+		{Address: "localhost", User: "test", Database: "/db", Name: string([]byte{0xff})},
 	} {
 		if r, err := Start(t.Context(), cfg); err == nil || r != nil {
 			t.Fatal("accepted invalid collector config")

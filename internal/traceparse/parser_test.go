@@ -199,7 +199,7 @@ func TestLiteralEllipsesAreNotTruncation(t *testing.T) {
 func TestSQLContinuationIsNotParameterMetadata(t *testing.T) {
 	for _, name := range []string{"parameter_value", "param0", "param10_column"} {
 		p := New()
-		events := p.Feed(record("EXECUTE_STATEMENT_START", "Statement 1:\n---\nSELECT\n"+name+"\nFROM T\nparam0 = integer, \"SECRET_CANARY\"") + record("TRACE_FINI", ""))
+		events := p.Feed(record("EXECUTE_STATEMENT_START", "Statement 1:\n---\nSELECT\n"+name+"\nFROM T\n\nparam0 = integer, \"SECRET_CANARY\"") + record("TRACE_FINI", ""))
 		if len(events) != 1 || events[0].Name != "SELECT T" || events[0].Incomplete || !strings.Contains(events[0].SQL, strings.ToUpper(name)) || strings.Contains(fmt.Sprint(events), "SECRET_CANARY") {
 			t.Fatal("incorrect parameter framing", events)
 		}
@@ -237,7 +237,7 @@ func TestSQLAliasDoesNotBecomePerformance(t *testing.T) {
 				t.Fatal("alias changed framing", events)
 			}
 		}
-		if events[0].DurationMS != 0 || events[1].DurationMS != 7 || events[1].Reads != 2 || events[1].Fetches != 4 || events[1].Marks != 3 {
+		if events[0].DurationMS != 0 || events[1].DurationMS != 7 || events[1].Reads != 2 || events[1].Writes != 1 || events[1].Fetches != 4 || events[1].Marks != 3 {
 			t.Fatal("wrong performance counters", events)
 		}
 	}
@@ -247,5 +247,78 @@ func TestSQLAliasDoesNotBecomePerformance(t *testing.T) {
 		if len(events) != 2 || events[1].Incomplete {
 			t.Fatal("native sparse counters rejected", events)
 		}
+	}
+}
+
+func TestTraceSectionsRemainDistinctFromSQL(t *testing.T) {
+	t.Run("parameter-shaped expression", func(t *testing.T) {
+		p := New()
+		sql := "SELECT\nparam0 = other_col, SAFE_COL\nFROM T"
+		events := p.Feed(record("EXECUTE_STATEMENT_START", "Statement 1:\n---\n"+sql) + record("EXECUTE_STATEMENT_FINISH", "Statement 1:\n---\n"+sql) + record("TRACE_FINI", ""))
+		if len(events) != 2 || events[0].Incomplete || events[0].Name != "SELECT T" || !strings.Contains(events[0].SQL, "PARAM0 = OTHER_COL") {
+			t.Fatal("parameter-shaped SQL was treated as metadata", events)
+		}
+	})
+
+	t.Run("affected rows and terminal ddl performance", func(t *testing.T) {
+		p := New()
+		dml := "UPDATE T SET V = 1"
+		ddl := "CREATE TABLE T2 (ID INTEGER)"
+		wire := record("EXECUTE_STATEMENT_START", "Statement 1:\n---\n"+dml) +
+			record("EXECUTE_STATEMENT_FINISH", "Statement 1:\n---\n"+dml+"\n1 records affected\n      4 ms, 2 read(s), 3 write(s), 5 fetch(es), 6 mark(s)") +
+			record("EXECUTE_STATEMENT_START", "Statement 2:\n---\n"+ddl) +
+			record("EXECUTE_STATEMENT_FINISH", "Statement 2:\n---\n"+ddl+"\n      7 ms, 8 write(s)") + record("TRACE_FINI", "")
+		events := p.Feed(wire)
+		if len(events) != 4 || events[1].SQL != "UPDATE T SET V = ?" || events[1].DurationMS != 4 || events[1].Writes != 3 || events[3].SQL != "CREATE TABLE T2 ( ID INTEGER )" || events[3].DurationMS != 7 || events[3].Writes != 8 {
+			t.Fatal("trace sections contaminated SQL", events)
+		}
+	})
+}
+
+func TestTraceOutputPreservesBoundedMetadata(t *testing.T) {
+	t.Run("compound plan", func(t *testing.T) {
+		p := New()
+		events := p.Feed(record("EXECUTE_STATEMENT_START", "Statement 1:\n---\nSELECT 1 FROM T UNION ALL SELECT 1 FROM U\n^^^^^^^^\nPLAN (T NATURAL)\nPLAN (U NATURAL)") + record("TRACE_FINI", ""))
+		if len(events) != 1 || events[0].Plan != "PLAN ( T NATURAL )\nPLAN ( U NATURAL )" || events[0].Incomplete {
+			t.Fatal("compound plan lost", events)
+		}
+	})
+
+	t.Run("delimited table counter name", func(t *testing.T) {
+		p := New()
+		row := fmt.Sprintf("%-32s%10d%10d%10d%10d%10d%10d%10d%10d", "Order Items", 1, 2, 3, 4, 5, 6, 7, 8)
+		body := "Procedure P:\n1 ms\nTable                              Natural     Index    Update    Insert    Delete   Backout     Purge   Expunge\n" + strings.Repeat("*", 112) + "\n" + row
+		events := p.Feed(record("EXECUTE_PROCEDURE_START", "Procedure P:") + record("EXECUTE_PROCEDURE_FINISH", body) + record("TRACE_FINI", ""))
+		if len(events) != 2 || len(events[1].Tables) != 1 || events[1].Tables[0].Name != "Order Items" || events[1].Tables[0].Expunge != 8 || events[1].Incomplete {
+			t.Fatal("delimited table metadata lost", events)
+		}
+	})
+
+	t.Run("bounded sql omission", func(t *testing.T) {
+		p := New()
+		columns := make([]string, 500)
+		for i := range columns {
+			columns[i] = fmt.Sprintf("LONG_COLUMN_NAME_%04d", i)
+		}
+		sql := "SELECT " + strings.Join(columns, ",") + " FROM T"
+		events := p.Feed(record("EXECUTE_STATEMENT_START", "Statement 1:\n---\n"+sql) + record("TRACE_FINI", ""))
+		if len(events) != 1 || events[0].SQL != "" || !events[0].Incomplete {
+			t.Fatal("bounded SQL omission not reported", events)
+		}
+	})
+}
+
+func TestTraceLifecycleAndStatementIdentity(t *testing.T) {
+	p := New()
+	events := p.Feed(record("TRACE_FINI", "SESSION finished"))
+	events = append(events, p.Flush()...)
+	if len(events) != 1 || events[0].Incomplete || events[0].Phase != "trace_fini" {
+		t.Fatal("clean lifecycle finish marked incomplete", events)
+	}
+
+	p = New()
+	events = p.Feed(record("EXECUTE_STATEMENT_START", "Statement invalid:\n---\nSELECT 1 FROM T") + record("EXECUTE_STATEMENT_FINISH", "Statement invalid:\n---\nSELECT 1 FROM T") + record("TRACE_FINI", ""))
+	if len(events) != 2 || events[0].Correlation != "unmatched" || events[1].Correlation != "unmatched" || !events[0].Incomplete || !events[1].Incomplete || events[0].Sequence != 0 || events[1].Sequence != 0 {
+		t.Fatal("missing statement identity was correlated", events)
 	}
 }

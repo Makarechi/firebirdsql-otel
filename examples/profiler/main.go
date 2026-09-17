@@ -25,11 +25,9 @@ func profile(ctx context.Context, db *sql.DB) (result report, err error) {
 		return result, err
 	}
 	defer conn.Close()
-	// All commands run on this pinned connection, outside an old snapshot transaction.
-	err = conn.QueryRowContext(ctx, `SELECT RDB$PROFILER.START_SESSION('firebirdotel synthetic example', NULL, NULL, NULL, 'DETAILED_REQUESTS') FROM RDB$DATABASE`).Scan(&result.ProfileID)
-	if err != nil {
-		return result, err
-	}
+	// Startup can succeed on the server even when the response is lost. Install
+	// cleanup before reading that response so the pinned connection cannot retain
+	// an ambiguous active profiler session.
 	active := true
 	defer func() {
 		if active {
@@ -39,6 +37,11 @@ func profile(ctx context.Context, db *sql.DB) (result report, err error) {
 			err = errors.Join(err, cleanupErr)
 		}
 	}()
+	// All commands run on this pinned connection, outside an old snapshot transaction.
+	err = conn.QueryRowContext(ctx, `SELECT RDB$PROFILER.START_SESSION('firebirdotel synthetic example', NULL, NULL, NULL, 'DETAILED_REQUESTS') FROM RDB$DATABASE`).Scan(&result.ProfileID)
+	if err != nil {
+		return result, err
+	}
 	rows, err := conn.QueryContext(ctx, `SELECT N FROM OTEL_REPORT`)
 	if err != nil {
 		return result, err

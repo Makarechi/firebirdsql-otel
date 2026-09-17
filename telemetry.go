@@ -131,7 +131,9 @@ func (t *telemetry) finish(op operation, err error, extra []attribute.KeyValue) 
 	}
 	sc := span.SpanContext()
 	if op.serverToken != "" {
-		if span.IsRecording() {
+		if err != nil {
+			t.c.ServerTrace.Discard(op.serverToken)
+		} else if span.IsRecording() {
 			t.c.ServerTrace.Bind(op.serverToken, sc)
 		} else {
 			t.c.ServerTrace.Discard(op.serverToken)

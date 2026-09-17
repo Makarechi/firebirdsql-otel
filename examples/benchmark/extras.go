@@ -81,22 +81,34 @@ func newExtras(ctx context.Context, mode, dsn string, business *sql.DB) (*extras
 		if err != nil {
 			return nil, err
 		}
+		stopCollector := func() error {
+			stop, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			return r.Shutdown(stop)
+		}
 		select {
 		case event, ok := <-r.Events():
 			if !ok || event.Phase != "ready" {
+				_ = stopCollector()
 				return nil, fmt.Errorf("trace collector not ready")
 			}
 		case <-ctx.Done():
+			_ = stopCollector()
 			return nil, ctx.Err()
 		}
 		var finished atomic.Int64
 		changed := make(chan struct{}, 1)
 		drained := make(chan struct{})
+		initialized := make(chan struct{})
+		var initializedOnce sync.Once
 		go func() {
 			defer close(drained)
 			for event := range r.Events() {
 				b, _ := json.Marshal(event)
 				e.bytes.Add(int64(len(b)))
+				if event.Kind == "lifecycle" && event.Phase == "trace_init" {
+					initializedOnce.Do(func() { close(initialized) })
+				}
 				if event.Kind == "procedure" && event.Name == "OTEL_REPORT" && event.Phase == "finish" {
 					finished.Add(1)
 					select {
@@ -106,6 +118,24 @@ func newExtras(ctx context.Context, mode, dsn string, business *sql.DB) (*extras
 				}
 			}
 		}()
+		var once sync.Once
+		var closeErr error
+		e.close = func() error {
+			once.Do(func() {
+				closeErr = stopCollector()
+				<-drained
+			})
+			return closeErr
+		}
+		select {
+		case <-initialized:
+		case <-drained:
+			_ = e.close()
+			return nil, fmt.Errorf("trace collector ended before initialization")
+		case <-ctx.Done():
+			_ = e.close()
+			return nil, ctx.Err()
+		}
 		e.wait = func(count int) error {
 			for finished.Load() < int64(count) {
 				select {
@@ -117,17 +147,6 @@ func newExtras(ctx context.Context, mode, dsn string, business *sql.DB) (*extras
 				}
 			}
 			return nil
-		}
-		var once sync.Once
-		var closeErr error
-		e.close = func() error {
-			once.Do(func() {
-				stop, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-				defer cancel()
-				closeErr = r.Shutdown(stop)
-				<-drained
-			})
-			return closeErr
 		}
 	}
 	return e, nil

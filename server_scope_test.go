@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -78,6 +79,17 @@ func (markerTrace) Register(parent otrace.SpanContext) string {
 func (markerTrace) Bind(string, otrace.SpanContext) {}
 func (markerTrace) Discard(string)                  {}
 
+type trackingMarkerTrace struct {
+	completed, bound, discarded int
+}
+
+func (*trackingMarkerTrace) Register(otrace.SpanContext) string {
+	return "0123456789abcdef0123456789abcdef"
+}
+func (t *trackingMarkerTrace) MarkerComplete(string)           { t.completed++ }
+func (t *trackingMarkerTrace) Bind(string, otrace.SpanContext) { t.bound++ }
+func (t *trackingMarkerTrace) Discard(string)                  { t.discarded++ }
+
 func TestServerMarkersPreserveClientBehavior(t *testing.T) {
 	recorder := tracetest.NewSpanRecorder()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
@@ -130,6 +142,39 @@ func TestServerMarkersPreserveClientBehavior(t *testing.T) {
 			}
 			if mode == "fallback" && len(recorder.Ended()) != before {
 				t.Fatal("ErrSkip exported duplicate client span")
+			}
+		})
+	}
+}
+
+func TestServerScopeUsesMarkerCompletionAndDiscardsFailedCalls(t *testing.T) {
+	for _, failed := range []bool{false, true} {
+		t.Run(fmt.Sprint(failed), func(t *testing.T) {
+			recorder := tracetest.NewSpanRecorder()
+			tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+			defer tp.Shutdown(context.Background())
+			server := &trackingMarkerTrace{}
+			c := SafeConfig()
+			c.TracerProvider = tp
+			c.ServerTrace = server
+			tel, err := newTelemetry(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var businessErr error
+			if failed {
+				businessErr = errors.New("business failure")
+			}
+			conn := &connState{raw: &markerConn{businessErr: businessErr}, t: tel}
+			_, err = conn.ExecContext(context.Background(), "execute procedure P(?)", []driver.NamedValue{{Ordinal: 1, Value: 1}})
+			if err != businessErr || server.completed != 1 {
+				t.Fatal("marker completion was not recorded", err, server)
+			}
+			if failed && (server.discarded != 1 || server.bound != 0) {
+				t.Fatal("failed business call retained a server scope", server)
+			}
+			if !failed && (server.bound != 1 || server.discarded != 0) {
+				t.Fatal("successful business call was not bound", server)
 			}
 		})
 	}

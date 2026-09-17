@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	otrace "go.opentelemetry.io/otel/trace"
@@ -118,6 +119,11 @@ func TestServerSpanBoundsAndStartup(t *testing.T) {
 	if len(one) != 32 {
 		t.Fatal("missing scope")
 	}
+	target.MarkerComplete(one)
+	marked, ok := target.lookup(one)
+	if !ok || marked.markerCompleted.IsZero() || marked.markerCompleted.Before(marked.registered) {
+		t.Fatal("marker completion was not retained")
+	}
 	if target.Register(otrace.SpanContext{}) != "" {
 		t.Fatal("unbounded registrations")
 	}
@@ -145,4 +151,54 @@ func TestServerSpanBoundsAndStartup(t *testing.T) {
 	if notStarted.Shutdown(context.Background()) == nil {
 		t.Fatal("startup error lost")
 	}
+}
+
+func TestServerSpanExportsAllPerformanceCountersAndMarkerTiming(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	defer tp.Shutdown(context.Background())
+	s, err := NewSpans(SpanConfig{TracerProvider: tp})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, parent := tp.Tracer("application").Start(context.Background(), "client")
+	defer parent.End()
+	serverAnchor := time.Date(2026, 9, 17, 8, 0, 0, 0, time.UTC)
+	localAnchor := serverAnchor.Add(time.Second)
+	start := serverAnchor.Add(10 * time.Millisecond)
+	end := start.Add(5 * time.Millisecond)
+	n := &serverNode{
+		start:    Event{Kind: "procedure", Name: "P", Sequence: 1, Timestamp: start.Format("2006-01-02T15:04:05.999999999")},
+		finish:   Event{Kind: "procedure", Name: "P", Sequence: 1, Timestamp: end.Format("2006-01-02T15:04:05.999999999"), DurationMS: 5, Reads: 1, Writes: 2, Fetches: 3, Marks: 4, Tables: []Table{{Name: "Order Items", Natural: 5, Index: 6, Update: 7, Insert: 8, Delete: 9, Backout: 10, Purge: 11, Expunge: 12}}},
+		complete: true,
+	}
+	s.exportTree(&serverTree{scope: scope{parent: parent.SpanContext(), registered: localAnchor.Add(-time.Second), markerCompleted: localAnchor}, anchor: serverAnchor, nodes: []*serverNode{n}, bySequence: map[uint64]*serverNode{1: n}, complete: true})
+	spans := recorder.Ended()
+	if len(spans) != 1 || !spans[0].StartTime().Equal(localAnchor.Add(10*time.Millisecond)) || !spans[0].EndTime().Equal(localAnchor.Add(15*time.Millisecond)) {
+		t.Fatal("server span was not aligned to marker completion", spans)
+	}
+	attrs := attributeMap(spans[0].Attributes())
+	for key, want := range map[string]int64{"firebird.pages.read": 1, "firebird.pages.write": 2, "firebird.pages.fetch": 3, "firebird.pages.mark": 4} {
+		if got := attrs[key].AsInt64(); got != want {
+			t.Fatalf("%s=%d want %d", key, got, want)
+		}
+	}
+	events := spans[0].Events()
+	if len(events) != 1 {
+		t.Fatal("table counters missing", events)
+	}
+	tableAttrs := attributeMap(events[0].Attributes)
+	for key, want := range map[string]int64{"firebird.rows.backout": 10, "firebird.rows.purge": 11, "firebird.rows.expunge": 12} {
+		if got := tableAttrs[key].AsInt64(); got != want {
+			t.Fatalf("%s=%d want %d", key, got, want)
+		}
+	}
+}
+
+func attributeMap(attrs []attribute.KeyValue) map[string]attribute.Value {
+	out := make(map[string]attribute.Value, len(attrs))
+	for _, a := range attrs {
+		out[string(a.Key)] = a.Value
+	}
+	return out
 }
