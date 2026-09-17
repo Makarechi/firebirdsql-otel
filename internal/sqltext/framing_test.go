@@ -23,3 +23,19 @@ func TestFramingIndependentOfSanitizerLimits(t *testing.T) {
 		}
 	}
 }
+
+func TestStatementMayEnd(t *testing.T) {
+	for _, sql := range []string{"EXECUTE PROCEDURE P", "CREATE TABLE T (ID INTEGER)", "CREATE VIEW V AS SELECT 1 FROM T"} {
+		if !StatementMayEnd(sql) {
+			t.Fatal("complete statement rejected", sql)
+		}
+	}
+	if sql := "SELECT " + strings.Repeat("1+", 2200) + "1"; !StatementMayEnd(sql) {
+		t.Fatal("sanitizer token limit affected framing")
+	}
+	for _, sql := range []string{"SELECT", "CREATE VIEW V AS SELECT", "SELECT A,", "UPDATE T SET"} {
+		if StatementMayEnd(sql) {
+			t.Fatal("incomplete prefix accepted", sql)
+		}
+	}
+}

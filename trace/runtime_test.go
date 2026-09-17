@@ -17,7 +17,7 @@ import (
 )
 
 type fakeTraceManager struct {
-	session       *fakeTraceSession
+	session       traceSession
 	name          string
 	config        string
 	ctxErr        error
@@ -46,6 +46,33 @@ type fakeTraceSession struct {
 	startOnce    sync.Once
 	closeStarted chan struct{}
 	blockClose   bool
+}
+
+type drainingTraceSession struct {
+	lines  []string
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (s *drainingTraceSession) WaitStringsContext(ctx context.Context, result chan string) error {
+	select {
+	case <-s.closed:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	for _, line := range s.lines {
+		select {
+		case result <- line:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
+func (s *drainingTraceSession) CloseContext(context.Context) error {
+	s.once.Do(func() { close(s.closed) })
+	return nil
 }
 
 func newFakeTraceSession() *fakeTraceSession {
@@ -90,6 +117,10 @@ func useFakeManager(t *testing.T, manager *fakeTraceManager) {
 	t.Cleanup(func() { newTraceManager = previous })
 }
 
+func runtimeTraceRecord(kind, body string) string {
+	return "2026-09-17T08:00:00.0000 (1:0x1) " + kind + " \n\t/db (ATT_1, test, UTF8)\n\t(TRA_1, READ_WRITE)\n\n" + body + "\n\n"
+}
+
 func TestRuntimeStartsAndShutsDownInProcess(t *testing.T) {
 	session := newFakeTraceSession()
 	manager := &fakeTraceManager{session: session}
@@ -128,6 +159,29 @@ func TestRuntimeShutdownDoesNotRequireEventConsumer(t *testing.T) {
 	defer cancel()
 	if err := r.Shutdown(ctx); err != nil {
 		t.Fatal("shutdown depended on draining Events", err)
+	}
+}
+
+func TestRuntimeShutdownDrainsFinalRecordsWhenQueueHasCapacity(t *testing.T) {
+	wire := runtimeTraceRecord("EXECUTE_PROCEDURE_START", "Procedure P:") +
+		runtimeTraceRecord("EXECUTE_PROCEDURE_FINISH", "Procedure P:\n4 ms, 2 read(s)") + runtimeTraceRecord("TRACE_FINI", "")
+	session := &drainingTraceSession{lines: strings.Split(strings.TrimSuffix(wire, "\n"), "\n"), closed: make(chan struct{})}
+	useFakeManager(t, &fakeTraceManager{session: session})
+	r, err := Start(t.Context(), Config{Address: "localhost", User: "test", Database: "/db", Name: "test", Buffer: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	if err := r.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var events []Event
+	for event := range r.Events() {
+		events = append(events, event)
+	}
+	if len(events) != 4 || events[2].Kind != "procedure" || events[2].Phase != "finish" || events[2].DurationMS != 4 || events[3].Phase != "trace_fini" {
+		t.Fatal("shutdown dropped final trace records", events)
 	}
 }
 

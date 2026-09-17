@@ -144,8 +144,10 @@ func (p *Parser) consume(line string) []Event {
 	if p.collectSQL {
 		trim := strings.TrimSpace(line)
 		complete := sqltext.LexicallyComplete(p.sql.String())
-		performanceBoundary := performanceLine.MatchString(trim) && terminalPerformanceOperation(p.sql.String())
-		boundary := header.MatchString(line) || strings.HasPrefix(trim, "^^^") || p.sqlSeparated && (parameter.MatchString(line) || trim == "returns:") || fetched.MatchString(trim) || affected.MatchString(trim) || performanceBoundary
+		mayEnd := complete && sqltext.StatementMayEnd(p.sql.String())
+		performanceBoundary := mayEnd && performanceLine.MatchString(trim) && terminalPerformanceOperation(p.sql.String())
+		metadataBoundary := mayEnd && (p.sqlSeparated && (parameter.MatchString(line) || trim == "returns:") || fetched.MatchString(trim) || affected.MatchString(trim))
+		boundary := header.MatchString(line) || strings.HasPrefix(trim, "^^^") || metadataBoundary || performanceBoundary
 		if !boundary || !sqltext.LexicallyComplete(p.sql.String()) {
 			p.recordBytes += len(line) + 1
 			if p.recordBytes > MaxRecord || p.sql.Len()+len(line)+1 > MaxRecord {

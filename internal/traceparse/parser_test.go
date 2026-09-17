@@ -252,11 +252,30 @@ func TestSQLAliasDoesNotBecomePerformance(t *testing.T) {
 
 func TestTraceSectionsRemainDistinctFromSQL(t *testing.T) {
 	t.Run("parameter-shaped expression", func(t *testing.T) {
+		for _, separator := range []string{"\n", "\n\n"} {
+			p := New()
+			sql := "SELECT" + separator + "param0 = other_col, SAFE_COL\nFROM T"
+			events := p.Feed(record("EXECUTE_STATEMENT_START", "Statement 1:\n---\n"+sql) + record("EXECUTE_STATEMENT_FINISH", "Statement 1:\n---\n"+sql) + record("TRACE_FINI", ""))
+			if len(events) != 2 || events[0].Incomplete || events[0].Name != "SELECT T" || !strings.Contains(events[0].SQL, "PARAM0 = OTHER_COL") {
+				t.Fatal("parameter-shaped SQL was treated as metadata", events)
+			}
+		}
 		p := New()
-		sql := "SELECT\nparam0 = other_col, SAFE_COL\nFROM T"
-		events := p.Feed(record("EXECUTE_STATEMENT_START", "Statement 1:\n---\n"+sql) + record("EXECUTE_STATEMENT_FINISH", "Statement 1:\n---\n"+sql) + record("TRACE_FINI", ""))
-		if len(events) != 2 || events[0].Incomplete || events[0].Name != "SELECT T" || !strings.Contains(events[0].SQL, "PARAM0 = OTHER_COL") {
-			t.Fatal("parameter-shaped SQL was treated as metadata", events)
+		sql := "SELECT\n\nparam0 = other_col, \"SAFE_COL\"\nFROM T"
+		events := p.Feed(record("EXECUTE_STATEMENT_START", "Statement 1:\n---\n"+sql) + record("TRACE_FINI", ""))
+		if len(events) != 1 || !events[0].Incomplete || events[0].Name != "SQL" || events[0].SQL != "" {
+			t.Fatal("ambiguous quoted SQL was truncated as complete", events)
+		}
+	})
+
+	t.Run("performance-shaped view expression", func(t *testing.T) {
+		p := New()
+		sql := "CREATE VIEW V AS SELECT\n1 ms\nFROM RDB$DATABASE"
+		wire := record("EXECUTE_STATEMENT_START", "Statement 1:\n---\n"+sql) +
+			record("EXECUTE_STATEMENT_FINISH", "Statement 1:\n---\n"+sql+"\n      6 ms, 2 read(s)") + record("TRACE_FINI", "")
+		events := p.Feed(wire)
+		if len(events) != 2 || events[1].SQL != "CREATE VIEW V AS SELECT ? MS FROM RDB$DATABASE" || events[1].DurationMS != 6 || events[1].Reads != 2 || events[1].Incomplete {
+			t.Fatal("view expression became performance metadata", events)
 		}
 	})
 

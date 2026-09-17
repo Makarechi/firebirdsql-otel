@@ -152,13 +152,19 @@ func (r *Runtime) run(ctx context.Context) {
 	emit := func(events []Event) bool {
 		for _, event := range events {
 			select {
-			case <-r.discard:
+			case r.events <- event:
 				continue
 			default:
 			}
 			select {
 			case r.events <- event:
 			case <-r.discard:
+				// Shutdown may need to unblock a full queue when there is no
+				// consumer. Preserve the event whenever capacity is available.
+				select {
+				case r.events <- event:
+				default:
+				}
 				continue
 			case <-ctx.Done():
 				return false
