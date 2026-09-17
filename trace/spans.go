@@ -355,7 +355,7 @@ func (s *SpanRuntime) consume(r *Runtime) {
 			}
 			if e.Phase == "start" {
 				tree := frames[e.ParentSequence]
-				if p, ok := pending[e.AttachmentID]; ok {
+				if p, ok := pending[e.AttachmentID]; ok && e.Kind == "statement" && e.ParentSequence == 0 {
 					delete(pending, e.AttachmentID)
 					if sc, valid := s.lookup(p.token); valid {
 						tree = &serverTree{token: p.token, scope: sc, anchor: p.anchor, bySequence: make(map[uint64]*serverNode)}

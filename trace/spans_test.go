@@ -176,6 +176,45 @@ func TestGapDiscardsPendingMarkerRegistrations(t *testing.T) {
 	<-s.done
 }
 
+func TestPendingMarkerWaitsForRootStatement(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	defer tp.Shutdown(context.Background())
+	s, err := NewSpans(SpanConfig{TracerProvider: tp})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.running = true
+	_, parent := tp.Tracer("application").Start(context.Background(), "client")
+	defer parent.End()
+	token := s.Register(parent.SpanContext())
+	s.Bind(token, parent.SpanContext())
+	r := &Runtime{events: make(chan Event), done: make(chan struct{})}
+	go s.consume(r)
+	base := Event{Source: "trace", Correlation: "heuristic", Timestamp: "2026-09-17T08:00:00.0000", AttachmentID: 1, TransactionID: 2}
+	marker := base
+	marker.Kind, marker.Phase, marker.ScopeToken = "statement", "finish", token
+	r.events <- marker
+	trigger := base
+	trigger.Kind, trigger.Name, trigger.Phase, trigger.Sequence = "trigger", "ON_COMMIT", "start", 1
+	r.events <- trigger
+	trigger.Phase, trigger.Timestamp = "finish", "2026-09-17T08:00:00.0010"
+	r.events <- trigger
+	statement := base
+	statement.Kind, statement.Name, statement.Phase, statement.Sequence = "statement", "SELECT T", "start", 2
+	r.events <- statement
+	statement.Phase, statement.Timestamp = "finish", "2026-09-17T08:00:00.0020"
+	r.events <- statement
+	r.events <- Event{} // Barrier: the statement finish has been processed.
+	close(r.done)
+	close(r.events)
+	<-s.done
+	spans := recorder.Ended()
+	if len(spans) != 1 || spans[0].Name() != "SELECT T" || spans[0].Parent().SpanID() != parent.SpanContext().SpanID() {
+		t.Fatal("marker was consumed before the root statement", spans)
+	}
+}
+
 func TestServerSpanExportsAllPerformanceCountersAndMarkerTiming(t *testing.T) {
 	recorder := tracetest.NewSpanRecorder()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
