@@ -284,6 +284,17 @@ func TestTraceSectionsRemainDistinctFromSQL(t *testing.T) {
 			t.Fatal("return metadata contaminated SQL", events)
 		}
 	})
+
+	t.Run("procedure without output metadata", func(t *testing.T) {
+		p := New()
+		sql := "EXECUTE PROCEDURE OTEL_DYNAMIC"
+		wire := record("EXECUTE_STATEMENT_START", "Statement 1:\n---\n"+sql) +
+			record("EXECUTE_STATEMENT_FINISH", "Statement 1:\n---\n"+sql+"\n      11 ms, 3 read(s), 5 write(s)") + record("TRACE_FINI", "")
+		events := p.Feed(wire)
+		if len(events) != 2 || events[1].SQL != sql || events[1].DurationMS != 11 || events[1].Reads != 3 || events[1].Writes != 5 || events[1].Incomplete {
+			t.Fatal("procedure performance contaminated SQL", events)
+		}
+	})
 }
 
 func TestTraceOutputPreservesBoundedMetadata(t *testing.T) {

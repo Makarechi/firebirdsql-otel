@@ -427,7 +427,7 @@ func (p *Parser) finish() *Event {
 func terminalPerformanceOperation(raw string) bool {
 	d := sqltext.AnalyzeUnknownDialect(raw, 0, 0)
 	switch d.Operation {
-	case "CREATE", "ALTER", "DROP", "RECREATE", "GRANT", "REVOKE", "COMMENT", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE", "SET", "EXECUTE BLOCK":
+	case "CREATE", "ALTER", "DROP", "RECREATE", "GRANT", "REVOKE", "COMMENT", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE", "SET", "EXECUTE BLOCK", "EXECUTE PROCEDURE":
 		return d.Valid
 	default:
 		return false
