@@ -145,7 +145,7 @@ func (p *Parser) consume(line string) []Event {
 		trim := strings.TrimSpace(line)
 		complete := sqltext.LexicallyComplete(p.sql.String())
 		performanceBoundary := performanceLine.MatchString(trim) && terminalPerformanceOperation(p.sql.String())
-		boundary := header.MatchString(line) || strings.HasPrefix(trim, "^^^") || p.sqlSeparated && parameter.MatchString(line) || fetched.MatchString(trim) || affected.MatchString(trim) || performanceBoundary
+		boundary := header.MatchString(line) || strings.HasPrefix(trim, "^^^") || p.sqlSeparated && (parameter.MatchString(line) || trim == "returns:") || fetched.MatchString(trim) || affected.MatchString(trim) || performanceBoundary
 		if !boundary || !sqltext.LexicallyComplete(p.sql.String()) {
 			p.recordBytes += len(line) + 1
 			if p.recordBytes > MaxRecord || p.sql.Len()+len(line)+1 > MaxRecord {
@@ -280,13 +280,14 @@ func (p *Parser) consume(line string) []Event {
 		return nil
 	}
 	if p.tableWidth >= 32 && len(line) >= p.tableWidth+80 && !strings.HasPrefix(line, "***") {
-		name := strings.TrimSpace(line[:p.tableWidth])
+		fieldsStart := len(line) - 80
+		name := strings.TrimSpace(line[:fieldsStart])
 		if metadataName(name) {
 			table := Table{Name: name}
 			values := []*int64{&table.Natural, &table.Index, &table.Update, &table.Insert, &table.Delete, &table.Backout, &table.Purge, &table.Expunge}
 			valid := true
 			for i, v := range values {
-				s := strings.TrimSpace(line[p.tableWidth+i*10 : p.tableWidth+(i+1)*10])
+				s := strings.TrimSpace(line[fieldsStart+i*10 : fieldsStart+(i+1)*10])
 				if s != "" {
 					n, err := strconv.ParseInt(s, 10, 64)
 					if err != nil {

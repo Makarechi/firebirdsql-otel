@@ -273,6 +273,17 @@ func TestTraceSectionsRemainDistinctFromSQL(t *testing.T) {
 			t.Fatal("trace sections contaminated SQL", events)
 		}
 	})
+
+	t.Run("returns metadata", func(t *testing.T) {
+		p := New()
+		sql := "EXECUTE PROCEDURE P"
+		wire := record("EXECUTE_STATEMENT_START", "Statement 1:\n---\n"+sql) +
+			record("EXECUTE_STATEMENT_FINISH", "Statement 1:\n---\n"+sql+"\n\nreturns:\nparam0 = integer, 42\n      9 ms, 2 read(s)") + record("TRACE_FINI", "")
+		events := p.Feed(wire)
+		if len(events) != 2 || events[1].SQL != "EXECUTE PROCEDURE P" || events[1].DurationMS != 9 || events[1].Reads != 2 || events[1].Incomplete {
+			t.Fatal("return metadata contaminated SQL", events)
+		}
+	})
 }
 
 func TestTraceOutputPreservesBoundedMetadata(t *testing.T) {
@@ -286,10 +297,11 @@ func TestTraceOutputPreservesBoundedMetadata(t *testing.T) {
 
 	t.Run("delimited table counter name", func(t *testing.T) {
 		p := New()
-		row := fmt.Sprintf("%-32s%10d%10d%10d%10d%10d%10d%10d%10d", "Order Items", 1, 2, 3, 4, 5, 6, 7, 8)
+		name := "Order Items With A Relation Name Longer Than Thirty Two"
+		row := fmt.Sprintf("%-32s%10d%10d%10d%10d%10d%10d%10d%10d", name, 1, 2, 3, 4, 5, 6, 7, 8)
 		body := "Procedure P:\n1 ms\nTable                              Natural     Index    Update    Insert    Delete   Backout     Purge   Expunge\n" + strings.Repeat("*", 112) + "\n" + row
 		events := p.Feed(record("EXECUTE_PROCEDURE_START", "Procedure P:") + record("EXECUTE_PROCEDURE_FINISH", body) + record("TRACE_FINI", ""))
-		if len(events) != 2 || len(events[1].Tables) != 1 || events[1].Tables[0].Name != "Order Items" || events[1].Tables[0].Expunge != 8 || events[1].Incomplete {
+		if len(events) != 2 || len(events[1].Tables) != 1 || events[1].Tables[0].Name != name || events[1].Tables[0].Expunge != 8 || events[1].Incomplete {
 			t.Fatal("delimited table metadata lost", events)
 		}
 	})

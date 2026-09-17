@@ -2,6 +2,8 @@ package main
 
 import (
 	"errors"
+	collector "github.com/Makarechi/firebirdsql-otel/trace"
+	"sync/atomic"
 	"testing"
 )
 
@@ -20,6 +22,22 @@ func TestWarmupRestartDrainsLateRecordsBeforeNewCounters(t *testing.T) {
 	})
 	if err != nil || current.bytes.Load() != 0 {
 		t.Fatal("warm-up telemetry leaked into measurement", err)
+	}
+}
+
+func TestTraceMeasurementWaitsForProcedureAndOuterStatement(t *testing.T) {
+	var procedures, statements atomic.Int64
+	if !observeTraceCompletion(collector.Event{Kind: "procedure", Name: "OTEL_REPORT", Phase: "finish"}, &procedures, &statements) {
+		t.Fatal("procedure completion was ignored")
+	}
+	if procedures.Load() != 1 || statements.Load() != 0 {
+		t.Fatal("procedure completion also counted the outer statement")
+	}
+	if !observeTraceCompletion(collector.Event{Kind: "statement", Name: "SELECT OTEL_REPORT", Phase: "finish"}, &procedures, &statements) {
+		t.Fatal("outer statement completion was ignored")
+	}
+	if procedures.Load() != 1 || statements.Load() != 1 {
+		t.Fatal("measurement barrier did not observe both records")
 	}
 }
 func TestWarmupRestartStopsOnDrainFailure(t *testing.T) {

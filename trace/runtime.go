@@ -213,8 +213,8 @@ func (r *Runtime) finish(readErr error) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if readErr != nil && !r.stopping {
-		r.err = errors.Join(r.err, errors.New("trace: stream ended with an error"))
+	if !r.stopping {
+		r.err = errors.Join(r.err, errors.New("trace: stream ended unexpectedly"))
 	}
 }
 

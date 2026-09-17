@@ -96,7 +96,7 @@ func newExtras(ctx context.Context, mode, dsn string, business *sql.DB) (*extras
 			_ = stopCollector()
 			return nil, ctx.Err()
 		}
-		var finished atomic.Int64
+		var procedureFinished, statementFinished atomic.Int64
 		changed := make(chan struct{}, 1)
 		drained := make(chan struct{})
 		initialized := make(chan struct{})
@@ -109,8 +109,7 @@ func newExtras(ctx context.Context, mode, dsn string, business *sql.DB) (*extras
 				if event.Kind == "lifecycle" && event.Phase == "trace_init" {
 					initializedOnce.Do(func() { close(initialized) })
 				}
-				if event.Kind == "procedure" && event.Name == "OTEL_REPORT" && event.Phase == "finish" {
-					finished.Add(1)
+				if observeTraceCompletion(event, &procedureFinished, &statementFinished) {
 					select {
 					case changed <- struct{}{}:
 					default:
@@ -137,7 +136,7 @@ func newExtras(ctx context.Context, mode, dsn string, business *sql.DB) (*extras
 			return nil, ctx.Err()
 		}
 		e.wait = func(count int) error {
-			for finished.Load() < int64(count) {
+			for procedureFinished.Load() < int64(count) || statementFinished.Load() < int64(count) {
 				select {
 				case <-changed:
 				case <-drained:
@@ -150,6 +149,21 @@ func newExtras(ctx context.Context, mode, dsn string, business *sql.DB) (*extras
 		}
 	}
 	return e, nil
+}
+
+func observeTraceCompletion(event collector.Event, procedures, statements *atomic.Int64) bool {
+	if event.Phase != "finish" {
+		return false
+	}
+	if event.Kind == "procedure" && event.Name == "OTEL_REPORT" {
+		procedures.Add(1)
+		return true
+	}
+	if event.Kind == "statement" && event.Name == "SELECT OTEL_REPORT" {
+		statements.Add(1)
+		return true
+	}
+	return false
 }
 
 func restartTraceAfterWarmup(previous *extras, start func() (*extras, error)) (*extras, error) {

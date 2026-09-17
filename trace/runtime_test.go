@@ -193,6 +193,22 @@ func TestRuntimeReportsSafeStreamAndCleanupErrors(t *testing.T) {
 	}
 }
 
+func TestRuntimeReportsUnexpectedCleanStreamEnd(t *testing.T) {
+	session := newFakeTraceSession()
+	manager := &fakeTraceManager{session: session}
+	useFakeManager(t, manager)
+	r, err := Start(t.Context(), Config{Address: "localhost", User: "test", Database: "/db", Name: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-r.Events()
+	session.closeOnce.Do(func() { close(session.closed) })
+	err = r.Wait(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "stream ended unexpectedly") {
+		t.Fatal("clean unsolicited stream end was not reported", err)
+	}
+}
+
 func TestRuntimeConfigurationValidation(t *testing.T) {
 	for _, cfg := range []Config{
 		{},
