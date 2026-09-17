@@ -19,6 +19,8 @@ import (
 type Event = traceparse.Event
 type Table = traceparse.Table
 
+const shutdownDrainGrace = 250 * time.Millisecond
+
 type Config struct {
 	Address, User, Password, Database string
 	// Name is an operator-chosen, non-sensitive session name, useful for diagnostics.
@@ -50,14 +52,16 @@ var newTraceManager = func(address, user, password string) (traceManager, error)
 }
 
 type Runtime struct {
-	events      chan Event
-	done        chan struct{}
-	cancel      context.CancelFunc
-	session     traceSession
-	closeOnce   sync.Once
-	closeDone   chan struct{}
-	discard     chan struct{}
-	discardOnce sync.Once
+	events       chan Event
+	done         chan struct{}
+	cancel       context.CancelFunc
+	session      traceSession
+	closeOnce    sync.Once
+	closeDone    chan struct{}
+	shutdown     chan struct{}
+	shutdownOnce sync.Once
+	discard      chan struct{}
+	discardOnce  sync.Once
 
 	mu       sync.Mutex
 	err      error
@@ -108,6 +112,7 @@ func Start(ctx context.Context, c Config) (*Runtime, error) {
 		cancel:    cancel,
 		session:   session,
 		closeDone: make(chan struct{}),
+		shutdown:  make(chan struct{}),
 		discard:   make(chan struct{}),
 	}
 	r.events <- Event{Source: "trace", Correlation: "unmatched", Kind: "lifecycle", Phase: "ready"}
@@ -166,6 +171,42 @@ func (r *Runtime) run(ctx context.Context) {
 				default:
 				}
 				continue
+			case <-r.shutdown:
+				timer := time.NewTimer(shutdownDrainGrace)
+				select {
+				case r.events <- event:
+					if !timer.Stop() {
+						select {
+						case <-timer.C:
+						default:
+						}
+					}
+				case <-timer.C:
+					r.discardOnce.Do(func() { close(r.discard) })
+					select {
+					case r.events <- event:
+					default:
+					}
+				case <-r.discard:
+					if !timer.Stop() {
+						select {
+						case <-timer.C:
+						default:
+						}
+					}
+					select {
+					case r.events <- event:
+					default:
+					}
+				case <-ctx.Done():
+					if !timer.Stop() {
+						select {
+						case <-timer.C:
+						default:
+						}
+					}
+					return false
+				}
 			case <-ctx.Done():
 				return false
 			}
@@ -245,7 +286,7 @@ func (r *Runtime) Shutdown(ctx context.Context) error {
 	r.mu.Lock()
 	r.stopping = true
 	r.mu.Unlock()
-	r.discardOnce.Do(func() { close(r.discard) })
+	r.shutdownOnce.Do(func() { close(r.shutdown) })
 	r.requestClose(ctx)
 	select {
 	case <-r.done:

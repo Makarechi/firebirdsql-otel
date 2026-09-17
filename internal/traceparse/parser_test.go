@@ -400,6 +400,16 @@ func TestTraceOutputPreservesBoundedMetadata(t *testing.T) {
 		}
 	})
 
+	t.Run("wide table counter with padded neighbor", func(t *testing.T) {
+		p := New()
+		row := fmt.Sprintf("%-32s%d%10d%10s%10s%10s%10s%10s%10s", "T", int64(10000000000), 2, "", "", "", "", "", "")
+		body := "Procedure P:\n1 ms\nTable                              Natural     Index    Update    Insert    Delete   Backout     Purge   Expunge\n" + strings.Repeat("*", 112) + "\n" + row
+		events := p.Feed(record("EXECUTE_PROCEDURE_START", "Procedure P:") + record("EXECUTE_PROCEDURE_FINISH", body) + record("TRACE_FINI", ""))
+		if len(events) != 2 || len(events[1].Tables) != 1 || events[1].Tables[0].Natural != 10000000000 || events[1].Tables[0].Index != 2 || events[1].Incomplete {
+			t.Fatal("padded boundary after wide counter was rejected", events)
+		}
+	})
+
 	t.Run("adjacent wide table counters", func(t *testing.T) {
 		p := New()
 		row := fmt.Sprintf("%-32s%s%s%10s%10s%10s%10s%10s%10s", "T", "10000000000", "20000000000", "", "", "", "", "", "")

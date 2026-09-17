@@ -351,13 +351,13 @@ func tableCounterRow(line string, minimumNameWidth int) (Table, bool) {
 		values  [8]int64
 	}
 	var candidates []candidate
-	var parse func(int, int, [8]int64, [8]int)
-	parse = func(field, end int, values [8]int64, digits [8]int) {
+	var parse func(int, int, [8]int64, [8]int, [8]bool)
+	parse = func(field, end int, values [8]int64, digits [8]int, padded [8]bool) {
 		if field < 0 {
 			name := strings.TrimSpace(line[:end])
 			ambiguous := false
 			for i := 0; i < len(digits)-1; i++ {
-				if digits[i] > 0 && digits[i+1] > 0 && (digits[i] > 10 || digits[i+1] > 10) {
+				if digits[i] > 0 && digits[i+1] > 0 && !padded[i+1] && (digits[i] > 10 || digits[i+1] > 10) {
 					ambiguous = true
 					break
 				}
@@ -383,13 +383,15 @@ func tableCounterRow(line string, minimumNameWidth int) (Table, bool) {
 		fixed := line[end-10 : end]
 		trimmed := strings.TrimSpace(fixed)
 		if trimmed == "" {
-			parse(field-1, end-10, values, digits)
+			parse(field-1, end-10, values, digits, padded)
 		} else if n, err := strconv.ParseInt(trimmed, 10, 64); err == nil && strings.TrimLeft(fixed, " ") == trimmed {
 			next := values
 			next[field] = n
 			nextDigits := digits
 			nextDigits[field] = len(trimmed)
-			parse(field-1, end-10, next, nextDigits)
+			nextPadded := padded
+			nextPadded[field] = len(trimmed) < len(fixed)
+			parse(field-1, end-10, next, nextDigits, nextPadded)
 		}
 		start := end
 		for start > 0 && line[start-1] >= '0' && line[start-1] <= '9' {
@@ -401,11 +403,11 @@ func tableCounterRow(line string, minimumNameWidth int) (Table, bool) {
 				next[field] = n
 				nextDigits := digits
 				nextDigits[field] = end - start
-				parse(field-1, start, next, nextDigits)
+				parse(field-1, start, next, nextDigits, padded)
 			}
 		}
 	}
-	parse(7, len(line), [8]int64{}, [8]int{})
+	parse(7, len(line), [8]int64{}, [8]int{}, [8]bool{})
 	if len(candidates) == 0 {
 		return Table{}, false
 	}

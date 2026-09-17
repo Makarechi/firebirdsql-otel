@@ -185,6 +185,37 @@ func TestRuntimeShutdownDrainsFinalRecordsWhenQueueHasCapacity(t *testing.T) {
 	}
 }
 
+func TestRuntimeShutdownWaitsForBackloggedConsumer(t *testing.T) {
+	wire := runtimeTraceRecord("EXECUTE_PROCEDURE_START", "Procedure P:") +
+		runtimeTraceRecord("EXECUTE_PROCEDURE_FINISH", "Procedure P:\n4 ms, 2 read(s)") + runtimeTraceRecord("TRACE_FINI", "")
+	session := &drainingTraceSession{lines: strings.Split(strings.TrimSuffix(wire, "\n"), "\n"), closed: make(chan struct{})}
+	useFakeManager(t, &fakeTraceManager{session: session})
+	r, err := Start(t.Context(), Config{Address: "localhost", User: "test", Database: "/db", Name: "test", Buffer: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	shutdown := make(chan error, 1)
+	go func() { shutdown <- r.Shutdown(ctx) }()
+	<-session.closed
+	select {
+	case err := <-shutdown:
+		t.Fatal("shutdown discarded a temporarily backlogged consumer", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	var events []Event
+	for event := range r.Events() {
+		events = append(events, event)
+	}
+	if err := <-shutdown; err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 4 || events[2].Kind != "procedure" || events[2].Phase != "finish" || events[3].Phase != "trace_fini" {
+		t.Fatal("shutdown dropped records for a backlogged consumer", events)
+	}
+}
+
 func TestRuntimeStartupAndShutdownRespectContexts(t *testing.T) {
 	t.Run("startup", func(t *testing.T) {
 		manager := &fakeTraceManager{session: newFakeTraceSession(), waitForCancel: true}
