@@ -89,7 +89,7 @@ func (s *SpanRuntime) Start(ctx context.Context, collector ...Config) error {
 	}
 	s.started = true
 	s.mu.Unlock()
-	r, err := Start(context.Background(), s.c.Collector)
+	r, err := Start(ctx, s.c.Collector)
 	s.mu.Lock()
 	s.collector = r
 	stopped := s.stopping

@@ -9,7 +9,6 @@ import (
 	"github.com/Makarechi/firebirdsql-otel/monitoring"
 	collector "github.com/Makarechi/firebirdsql-otel/trace"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -78,14 +77,14 @@ func newExtras(ctx context.Context, mode, dsn string, business *sql.DB) (*extras
 			return nil, err
 		}
 		password, _ := u.User.Password()
-		r, err := collector.Start(ctx, collector.Config{Executable: os.Getenv("FIREBIRD_TRACE_BINARY"), Address: u.Host, User: u.User.Username(), Password: password, Database: u.Path, Name: "firebirdotel-benchmark"})
+		r, err := collector.Start(ctx, collector.Config{Address: u.Host, User: u.User.Username(), Password: password, Database: u.Path, Name: "firebirdotel-benchmark"})
 		if err != nil {
 			return nil, err
 		}
 		select {
 		case event, ok := <-r.Events():
 			if !ok || event.Phase != "ready" {
-				return nil, fmt.Errorf("trace worker not ready")
+				return nil, fmt.Errorf("trace collector not ready")
 			}
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -112,7 +111,7 @@ func newExtras(ctx context.Context, mode, dsn string, business *sql.DB) (*extras
 				select {
 				case <-changed:
 				case <-drained:
-					return fmt.Errorf("trace worker ended before catch-up")
+					return fmt.Errorf("trace collector ended before catch-up")
 				case <-ctx.Done():
 					return ctx.Err()
 				}

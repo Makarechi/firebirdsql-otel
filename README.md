@@ -1,7 +1,7 @@
 # firebirdsql-otel
 
 OpenTelemetry instrumentation for the Go Firebird driver
-[`nakagami/firebirdsql`](https://github.com/nakagami/firebirdsql) **v0.9.20**.
+[`nakagami/firebirdsql`](https://github.com/nakagami/firebirdsql) **v0.9.21**.
 Uses OpenTelemetry Go **v1.44.0** and requires Go 1.25 or later.
 
 ## Quick start

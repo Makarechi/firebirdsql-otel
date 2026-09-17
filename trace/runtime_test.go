@@ -6,52 +6,137 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/Makarechi/firebirdsql-otel/internal/traceparse"
 	"net/url"
 	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/Makarechi/firebirdsql-otel/internal/traceparse"
 )
 
-func TestRuntimeBoundedShutdown(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Unix signal helper")
-	}
-	path := filepath.Join(t.TempDir(), "worker")
-	script := "#!/bin/sh\ntrap '' INT\nwhile true; do printf '%s\\n' '{\"Source\":\"trace\",\"Kind\":\"test\"}'; done\n"
-	if err := os.WriteFile(path, []byte(script), 0700); err != nil {
-		t.Fatal(err)
-	}
-	r, err := Start(context.Background(), Config{Executable: path, Address: "localhost", User: "test", Password: "SECRET", Database: "/db", Name: "test", Buffer: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-r.Events():
-	case <-time.After(3 * time.Second):
-		t.Fatal("no events")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	start := time.Now()
-	err = r.Shutdown(ctx)
-	if time.Since(start) > 2*time.Second {
-		t.Fatal("unbounded stop")
-	}
-	if err == nil {
-		t.Fatal("forced stop must report cleanup uncertainty")
-	}
+type fakeTraceManager struct {
+	session *fakeTraceSession
+	name    string
+	config  string
+	ctxErr  error
+	err     error
 }
-func TestInvalidWorkerInput(t *testing.T) {
-	for _, s := range []string{"invalid", `{"Database":"/db\nother"}`} {
-		if err := RunWorker(context.Background(), strings.NewReader(s), os.Stdout); err == nil {
-			t.Fatal("accepted input")
+
+func (m *fakeTraceManager) StartWithNameContext(ctx context.Context, name, config string) (traceSession, error) {
+	m.name, m.config, m.ctxErr = name, config, ctx.Err()
+	if m.err != nil {
+		return nil, m.err
+	}
+	return m.session, nil
+}
+
+type fakeTraceSession struct {
+	chunks    chan string
+	closed    chan struct{}
+	waitErr   error
+	closeErr  error
+	closeOnce sync.Once
+}
+
+func newFakeTraceSession() *fakeTraceSession {
+	return &fakeTraceSession{chunks: make(chan string, 8), closed: make(chan struct{})}
+}
+
+func (s *fakeTraceSession) WaitStringsContext(ctx context.Context, result chan string) error {
+	for {
+		select {
+		case chunk := <-s.chunks:
+			select {
+			case result <- chunk:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		case <-s.closed:
+			return s.waitErr
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
 }
+
+func (s *fakeTraceSession) CloseContext(context.Context) error {
+	s.closeOnce.Do(func() { close(s.closed) })
+	return s.closeErr
+}
+
+func useFakeManager(t *testing.T, manager *fakeTraceManager) {
+	t.Helper()
+	previous := newTraceManager
+	newTraceManager = func(string, string, string) (traceManager, error) { return manager, nil }
+	t.Cleanup(func() { newTraceManager = previous })
+}
+
+func TestRuntimeStartsAndShutsDownInProcess(t *testing.T) {
+	session := newFakeTraceSession()
+	manager := &fakeTraceManager{session: session}
+	useFakeManager(t, manager)
+
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	r, err := Start(ctx, Config{Address: "localhost", User: "test", Password: "SECRET", Database: "/db", Name: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := <-r.Events()
+	if e.Kind != "lifecycle" || e.Phase != "ready" || manager.name != "test" || !strings.Contains(manager.config, `database = "/db"`) {
+		t.Fatalf("collector did not become ready with expected config: event=%+v name=%q", e, manager.name)
+	}
+	if err := r.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := <-r.Events(); ok {
+		t.Fatal("events remained open after shutdown")
+	}
+}
+
+func TestRuntimeReportsSafeStreamAndCleanupErrors(t *testing.T) {
+	for _, cleanupFailure := range []bool{false, true} {
+		t.Run(fmt.Sprint(cleanupFailure), func(t *testing.T) {
+			session := newFakeTraceSession()
+			session.waitErr = errors.New("SECRET_STREAM_ERROR")
+			if cleanupFailure {
+				session.closeErr = errors.New("SECRET_CLOSE_ERROR")
+			}
+			manager := &fakeTraceManager{session: session}
+			useFakeManager(t, manager)
+			r, err := Start(t.Context(), Config{Address: "localhost", User: "test", Database: "/db", Name: "test"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			<-r.Events()
+			session.closeOnce.Do(func() { close(session.closed) })
+			err = r.Wait(t.Context())
+			if err == nil || strings.Contains(err.Error(), "SECRET") || !strings.Contains(err.Error(), "stream ended") {
+				t.Fatal("unsafe or missing stream error", err)
+			}
+			if cleanupFailure && !strings.Contains(err.Error(), "session cleanup failed") {
+				t.Fatal("cleanup failure lost", err)
+			}
+		})
+	}
+}
+
+func TestRuntimeConfigurationValidation(t *testing.T) {
+	for _, cfg := range []Config{
+		{},
+		{Address: "localhost", User: "test", Database: "/db", Name: "bad\nname"},
+		{Address: "localhost", User: "test", Database: "/bad\npath", Name: "test"},
+		{Address: "localhost", User: "test", Database: "/db", Name: "test", Buffer: 257},
+		{Address: "localhost", User: strings.Repeat("x", 257), Database: "/db", Name: "test"},
+	} {
+		if r, err := Start(t.Context(), cfg); err == nil || r != nil {
+			t.Fatal("accepted invalid collector config")
+		}
+	}
+}
+
 func TestEventEncoding(t *testing.T) {
 	b, err := json.Marshal(Event{Source: "trace", Correlation: "unmatched", Kind: "gap", Incomplete: true})
 	if err != nil || !strings.Contains(string(b), "gap") {
@@ -61,18 +146,17 @@ func TestEventEncoding(t *testing.T) {
 
 func TestFirebird5Trace(t *testing.T) {
 	dsn := os.Getenv("FIREBIRD_TEST_DSN")
-	binary := os.Getenv("FIREBIRD_TRACE_BINARY")
-	if dsn == "" || binary == "" {
-		t.Skip("requires isolated Firebird 5 and compiled trace worker")
+	if dsn == "" {
+		t.Skip("requires isolated Firebird 5")
 	}
 	u, err := url.Parse("firebird://" + strings.TrimPrefix(dsn, "firebird://"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	password, _ := u.User.Password()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
-	r, err := Start(ctx, Config{Executable: binary, Address: u.Host, User: u.User.Username(), Password: password, Database: u.Path, Name: "firebirdotel-live-test"})
+	r, err := Start(ctx, Config{Address: u.Host, User: u.User.Username(), Password: password, Database: u.Path, Name: "firebirdotel-live-test"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +170,7 @@ func TestFirebird5Trace(t *testing.T) {
 	select {
 	case e, ok := <-r.Events():
 		if !ok || e.Phase != "ready" {
-			t.Fatal("worker did not start", e, r.Wait(ctx))
+			t.Fatal("collector did not start", e, r.Wait(ctx))
 		}
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
@@ -110,7 +194,6 @@ func TestFirebird5Trace(t *testing.T) {
 	if err := db.QueryRowContext(ctx, longSQL).Scan(&value); err != nil || value != 1 {
 		t.Fatal("large native SQL failed", err)
 	}
-	// The parser finalizes a record on the following native header.
 	if err := db.QueryRowContext(ctx, "select count(*) from OTEL_A").Scan(&value); err != nil {
 		t.Fatal(err)
 	}
@@ -119,9 +202,8 @@ func TestFirebird5Trace(t *testing.T) {
 		select {
 		case e, ok := <-r.Events():
 			if !ok {
-				t.Fatal("worker ended", r.Wait(ctx), found)
+				t.Fatal("collector ended", r.Wait(ctx), found)
 			}
-			t.Logf("event kind=%s phase=%s name=%s incomplete=%v", e.Kind, e.Phase, e.Name, e.Incomplete)
 			if e.Source != "trace" || e.Correlation == "exact" {
 				t.Fatal("invalid provenance", e)
 			}
@@ -140,63 +222,5 @@ func TestFirebird5Trace(t *testing.T) {
 		case <-ctx.Done():
 			t.Fatal(ctx.Err(), found)
 		}
-	}
-	t.Log("observed actual outer, nested procedure, function and trigger finishes")
-}
-
-func TestEncodedWorkerConfigurationBound(t *testing.T) {
-	want := workerConfig{strings.Repeat("<", 512), strings.Repeat(">", 256), strings.Repeat("&", 4096), strings.Repeat("<", 1024), strings.Repeat(">", 128)}
-	data, err := json.Marshal(want)
-	if err != nil || len(data) <= 8192 {
-		t.Fatal("fixture must exceed previous encoded limit", err)
-	}
-	got, err := decodeWorkerConfig(strings.NewReader(string(data)))
-	if err != nil || got != want {
-		t.Fatal("accepted raw fields did not round trip", err)
-	}
-	for _, bad := range []string{strings.Repeat(" ", maxWorkerConfig+1), string(data) + "{}", `{"Password":"` + strings.Repeat("x", 4097) + `"}`} {
-		if _, err := decodeWorkerConfig(strings.NewReader(bad)); err == nil {
-			t.Fatal("accepted oversized or trailing input")
-		}
-	}
-}
-
-func TestMalformedWorkerRetainsCleanupUncertainty(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Unix signal helper")
-	}
-	for _, oversized := range []bool{false, true} {
-		t.Run(fmt.Sprint(oversized), func(t *testing.T) {
-			payload := "SECRET_CANARY_INVALID_JSON"
-			expected := "invalid worker record"
-			if oversized {
-				payload = strings.Repeat("x", 65537)
-				expected = "exceeds bound"
-			}
-			path := filepath.Join(t.TempDir(), "worker")
-			script := "#!/bin/sh\ntrap '' INT\nprintf '%s\\n' '" + payload + "'\nwhile :; do :; done\n"
-			if err := os.WriteFile(path, []byte(script), 0700); err != nil {
-				t.Fatal(err)
-			}
-			r, err := Start(t.Context(), Config{Executable: path, Address: "localhost", User: "test", Database: "/db", Name: "test"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			ctx, cancel := context.WithTimeout(t.Context(), 4*time.Second)
-			defer cancel()
-			err = r.Wait(ctx)
-			if err == nil || !strings.Contains(err.Error(), expected) || !strings.Contains(err.Error(), "server session cleanup may be required") || strings.Contains(err.Error(), "SECRET_CANARY") {
-				t.Fatal("lost safe parse failure or cleanup uncertainty", err)
-			}
-		})
-	}
-}
-func TestUnsupportedWindowsCollector(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("verified on Windows CI")
-	}
-	r, err := Start(t.Context(), Config{Executable: "must-not-run.exe", Address: "localhost", User: "test", Database: "/db", Name: "test"})
-	if r != nil || !errors.Is(err, errors.ErrUnsupported) {
-		t.Fatal("Windows launch was not rejected", err)
 	}
 }

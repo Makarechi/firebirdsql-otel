@@ -58,7 +58,7 @@ padding; leading whitespace and other characters remain part of the object ident
 The snapshot is fixed from the first MON$ query through transaction completion, even
 at read committed isolation. A second Read uses a new transaction. Only this reader's
 transaction is completed; never pass a business transaction to it. Queries are SELECT-only
-but deliberately use an ordinary transaction: firebirdsql v0.9.20 retains its read-only
+but deliberately use an ordinary transaction: firebirdsql v0.9.21 retains its read-only
 transaction setting for subsequent implicit transactions after a read-only BeginTx.
 The live integration test verified that catalog reads do not leave that setting in the pool.
 
@@ -77,18 +77,14 @@ not metric dimensions. Each collection has a bounded row count and a truncation 
 
 Ordinary client instrumentation observes the outer SQL call. Enable server spans
 explicitly to see procedures, functions, triggers and SQL statements actually
-reported by Firebird Trace beneath that call. Build the isolated worker first:
-
-```sh
-go build -o firebirdotel-trace github.com/Makarechi/firebirdsql-otel/cmd/firebirdotel-trace
-```
+reported by Firebird Trace beneath that call. The collector runs in the application;
+no helper executable is required.
 
 ```go
 // fbtrace is github.com/Makarechi/firebirdsql-otel/trace.
 server, err := fbtrace.NewSpans(fbtrace.SpanConfig{})
 if err != nil { return err }
 err = server.Start(startupContext, fbtrace.Config{
-    Executable: "/absolute/path/firebirdotel-trace",
     Address: "localhost:3050", User: diagnosticUser, Password: password,
     Database: "/var/lib/firebird/data/app.fdb", Name: "billing-primary-diagnostics",
 })
@@ -150,24 +146,22 @@ trees. Missing matched children mark exported trees `firebird.incomplete=true`.
 operations on different connections are independent; overlapping open cursors on one
 connection are deliberately not attributed. Unregistered traffic is never exported.
 Separate runtimes only export their own tokens, even when observing the same database.
-During otherwise idle traffic, the worker releases a parsed finish record after
+During otherwise idle traffic, the collector releases a parsed finish record after
 250 ms without requiring another application query. Such a record is marked
 incomplete because additional table counters could still arrive; unfinished SQL
 and start records are never finalized by the idle timer.
 
-The worker and server-side privacy/lifecycle boundaries below also apply. Inspect
-collector failures and orphan trace sessions before restarting explicitly; the
-runtime does not reconnect and pretend that the stream stayed complete. Use
-`server.Wait(ctx)` to observe unexpected worker termination; ordinary client
+The collector and server-side privacy/lifecycle boundaries below also apply. The
+runtime does not reconnect and pretend that a failed stream stayed complete. Use
+`server.Wait(ctx)` to observe unexpected collector termination; ordinary client
 queries continue and new marker registrations stop after the collector ends.
 
 ## Experimental Trace collector
 
-Build `go build -o firebirdotel-trace ./cmd/firebirdotel-trace`, then explicitly start:
+Start the collector explicitly:
 
 ```go
 runtime, err := trace.Start(ctx, trace.Config{
-    Executable: "/absolute/path/firebirdotel-trace",
     Address: "localhost:3050", User: diagnosticUser, Password: password,
     Database: "/var/lib/firebird/data/app.fdb", Name: "billing-diagnostic-42",
 })
@@ -178,12 +172,12 @@ err = runtime.Wait(ctx)
 // On early exit: runtime.Shutdown(shutdownContext).
 ```
 
-The worker uses the existing driver's NewTraceManager, StartWithName and WaitStrings.
+The collector uses the driver's context-aware Trace lifecycle added in v0.9.21.
 It requests start and finish events with time_threshold=0, plans and performance/table
 counters. Database paths are escaped as literal SIMILAR TO patterns and then encoded for the
 Trace configuration container. Wildcards, quantifiers and backslashes cannot broaden
 the selection. Control characters and embedded double quotes are rejected.
-Statements are sanitized before IPC/event queuing. Procedure/function/trigger names,
+Statements are sanitized before public event queuing. Procedure/function/trigger names,
 page counters and per-table counters are typed; tables are summaries, not timed spans.
 Classic PLAN lines (including JOIN, SORT, HASH and MERGE) are sanitized; other plan
 forms are omitted conservatively. Attachment/transaction/statement IDs are parsed
@@ -212,19 +206,18 @@ or add dialect 1 support, and does not alter explicit routine/table identity fie
 
 Names and table identities are schema metadata, not secret argument values. Client
 SQL, bind parameters, connection strings, user/process details and raw error lines
-are not forwarded. SQL record staging and lines are bounded at 64 KiB. The worker requests at most
+are not forwarded. SQL record staging and lines are bounded at 64 KiB. The collector requests at most
 48 KiB of SQL, leaving 16 KiB for record metadata, plans and counters; the complete
 record cap still applies to exceptionally large metadata/plan output. SQL output
 at 4096 bytes, table summaries at 64, nesting at 64, active attachment/transaction
-scopes at 64, and the public queue at 1–256 events (64 by default). Worker configuration
-input has a shared bound allowing six-byte JSON expansion of every accepted field;
-encoded overflow, trailing JSON and raw field-limit violations are rejected.
+scopes at 64, and the public queue at 1–256 events (64 by default). Connection and
+session configuration fields have explicit size limits and reject invalid database
+filter characters.
 
-The worker's WaitStrings channel is an **unbuffered raw transport handoff** imposed by
-the driver API. It exists only in the disposable worker; the public queue and IPC
-contain sanitized records. The upstream driver has its own wire buffers outside the
+The driver's WaitStrings channel is an **unbuffered raw transport handoff**. It is
+private to the collector; the public queue contains sanitized records. The upstream driver has its own wire buffers outside the
 parser's limits. Trace data may already contain sensitive text on the server and in
-the encrypted transport before the worker sees it. In Firebird, max_arg_count=0 means
+the encrypted transport before the collector sees it. In Firebird, max_arg_count=0 means
 unlimited, not disabled. The supplied config limits argument count/length but still
 relies on discarding argument lines; it does not promise server-side redaction.
 
@@ -238,21 +231,12 @@ complete PSQL execution tree. Do not attach server events as exact HTTP children
 The optional `SpanRuntime` uses a SQL marker for the client parent and retains
 heuristic nesting.
 
-**The supervised collector does not support Windows.** Start returns an error
-matching `errors.ErrUnsupported` before launching a worker on Windows; its interrupt
-mechanism requires Unix. Safe client instrumentation and other diagnostics are not
-restricted by this collector-specific check.
-
-**This is not a production in-process collector.** Upstream startup/read/stop calls
-lack cancellable lifecycle guarantees. RunWorker is the helper entry point only;
-applications should use the supervised process API. Shutdown sends an interrupt,
-allows one second for Stop/read completion/Close, then kills a blocked worker. Tests
-cover a nonresponsive worker, a full event queue, and real Firebird session shutdown.
-A forced kill reports failure/cleanup uncertainty, including when a malformed or
-oversized worker record also caused cancellation; both safe errors are retained. It releases local process/socket
-resources, but cannot guarantee server-side session removal. Inspect/stop sessions by
-the operator-chosen name before restarting after a forced shutdown. There is no
-automatic reconnect that silently reconstructs an allegedly complete tree.
+The collector is portable across the platforms supported by the driver. Startup,
+stream reads, server-side stop and connection cleanup use context-aware v0.9.21 APIs.
+`Shutdown` stops the Trace session, drains final records and releases the service
+connection within the supplied context. Tests cover cancellation, a bounded event
+queue and real Firebird session shutdown. There is no automatic reconnect that
+silently reconstructs an allegedly complete tree.
 
 ## Manual Profiler example
 
@@ -274,4 +258,4 @@ Profiler SDK or automatic profiling of production traffic.
 - [Firebird 5 monitoring semantics](https://firebirdsql.org/file/documentation/chunk/en/refdocs/fblangref50/fblangref50-appx05-montables.html)
 - [Firebird 5.0.3 Trace output implementation](https://github.com/FirebirdSQL/firebird/blob/v5.0.3/src/utilities/ntrace/TracePluginImpl.cpp)
 - [Firebird 5.0.3 profiler API](https://github.com/FirebirdSQL/firebird/blob/v5.0.3/doc/sql.extensions/README.profiler.md)
-- [Pinned driver Trace lifecycle](https://github.com/nakagami/firebirdsql/blob/v0.9.20/trace_manager.go)
+- [Pinned driver Trace lifecycle](https://github.com/nakagami/firebirdsql/blob/v0.9.21/trace_manager.go)

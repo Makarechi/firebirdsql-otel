@@ -5,14 +5,9 @@ import (
 	"database/sql/driver"
 	"errors"
 	"io"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
-	"time"
 
-	servertrace "github.com/Makarechi/firebirdsql-otel/trace"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	otrace "go.opentelemetry.io/otel/trace"
@@ -72,33 +67,22 @@ func (r *markerRows) Next(v []driver.Value) error {
 	return nil
 }
 
-func TestServerMarkersPreserveClientBehavior(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Unix supervised worker")
+type markerTrace struct{}
+
+func (markerTrace) Register(parent otrace.SpanContext) string {
+	if parent.IsValid() && !parent.IsSampled() {
+		return ""
 	}
+	return "0123456789abcdef0123456789abcdef"
+}
+func (markerTrace) Bind(string, otrace.SpanContext) {}
+func (markerTrace) Discard(string)                  {}
+
+func TestServerMarkersPreserveClientBehavior(t *testing.T) {
 	recorder := tracetest.NewSpanRecorder()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
 	defer tp.Shutdown(context.Background())
-	server, err := servertrace.NewSpans(servertrace.SpanConfig{TracerProvider: tp})
-	if err != nil {
-		t.Fatal(err)
-	}
-	worker := filepath.Join(t.TempDir(), "worker")
-	if err := os.WriteFile(worker, []byte("#!/bin/sh\ntrap 'exit 0' INT TERM\nprintf '%s\\n' '{\"Kind\":\"lifecycle\",\"Phase\":\"ready\"}'\nwhile :; do sleep 0.05; done\n"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-	if err := server.Start(ctx, servertrace.Config{Executable: worker, Address: "localhost", User: "synthetic", Database: "/db", Name: "test"}); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		stop, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		if err := server.Shutdown(stop); err != nil {
-			t.Error(err)
-		}
-	}()
+	server := markerTrace{}
 	for _, mode := range []string{"enabled", "disabled", "filtered", "unsampled", "marker_failure", "fallback", "overlapping_cursor"} {
 		t.Run(mode, func(t *testing.T) {
 			c := SafeConfig()

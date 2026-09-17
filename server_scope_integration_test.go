@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -19,10 +18,6 @@ import (
 
 func TestFirebird5ServerSpans(t *testing.T) {
 	dsn := integrationDSN(t)
-	binary := os.Getenv("FIREBIRD_TRACE_BINARY")
-	if binary == "" {
-		t.Skip("requires trace worker")
-	}
 	u, err := url.Parse("firebird://" + strings.TrimPrefix(dsn, "firebird://"))
 	if err != nil {
 		t.Fatal(err)
@@ -37,7 +32,7 @@ func TestFirebird5ServerSpans(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
-	if err := runtime.Start(ctx, servertrace.Config{Executable: binary, Address: u.Host, User: u.User.Username(), Password: password, Database: u.Path, Name: "firebirdotel-nested-spans"}); err != nil {
+	if err := runtime.Start(ctx, servertrace.Config{Address: u.Host, User: u.User.Username(), Password: password, Database: u.Path, Name: "firebirdotel-nested-spans"}); err != nil {
 		t.Fatal(err)
 	}
 	defer func() {

@@ -23,7 +23,7 @@ func TestWarmupRestartDrainsLateRecordsBeforeNewCounters(t *testing.T) {
 	}
 }
 func TestWarmupRestartStopsOnDrainFailure(t *testing.T) {
-	failure := errors.New("worker did not drain")
+	failure := errors.New("collector did not drain")
 	_, err := restartTraceAfterWarmup(&extras{close: func() error { return failure }}, func() (*extras, error) { t.Fatal("started despite failed barrier"); return nil, nil })
 	if err != failure {
 		t.Fatal("drain failure hidden")

@@ -15,7 +15,7 @@ below adds them without a driver fork, changes to business procedures or a serve
 | W06 | Individual begin/commit/rollback spans, profile noise flags and pre-execution filter; explicit pool metric registration/unregistration, no background work from Open |
 | W07 | Bounded metadata graph with database/object/type/package/schema identity, TTL, eviction/invalidation/cycles; unknown execution and package-body precision documented; mock and live catalog tests |
 | W08 | Explicit separate diagnostic pool, owned fresh MON$ transactions with attachment/statement scope; no business transaction commits; table counters and visibility limits documented and tested |
-| W09 | Existing native TraceManager in a supervised helper, bounded parser/events/matching, actual procedure/function/trigger/plan/table observations; heuristic correlation and gaps; live Trace and lifecycle tests |
+| W09 | Native TraceManager v0.9.21 with cancellable in-process lifecycle, bounded parser/events/matching, actual procedure/function/trigger/plan/table observations; heuristic correlation and gaps; live Trace and lifecycle tests |
 | W10 | Manual pinned-connection Profiler example with DETAILED_REQUESTS, selectable EOF before finish, autonomous flush and fresh read; real Firebird test |
 
 The work is arranged as a dependency upgrade followed by four reviewable layers:
@@ -32,9 +32,9 @@ integration setup; every layer preserves the old public API.
 - Client durations measure API calls/consumption, not a complete server execution tree.
   Metadata is possible dependency data, MON$ is a sampled snapshot, and Trace matching
   is heuristic. No diagnostic source is automatically attached as an exact HTTP child.
-- Trace remains **experimental and process-isolated**. Upstream lacks cancellable
-  start/read/stop guarantees. Forced termination bounds local cleanup but can require
-  operator removal of a server session. Server/transport Trace and Profiler data can
+- Trace remains **experimental**. The v0.9.21 driver provides cancellable
+  start/read/stop and cleanup, so the collector runs in process without a helper binary.
+  Server/transport Trace and Profiler data can
   already contain sensitive SQL; server-side redaction is not promised.
 - Classic Trace PLAN output is supported; unsupported plan text is omitted. Packaged
   metadata can be resolved only to package-body scope. Dynamic dependencies may be absent.

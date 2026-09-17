@@ -31,10 +31,6 @@ jobs:
           cache: true
       - name: Install synthetic schema
         run: docker exec -i ${{ job.services.firebird.id }} /opt/firebird/bin/isql -b -user SYSDBA -password synthetic-test-only /var/lib/firebird/data/otel_review+1.fdb < testdata/firebird5/schema.sql
-      - name: Build supervised Trace worker
-        run: |
-          go build -o "$RUNNER_TEMP/firebirdotel-trace" ./cmd/firebirdotel-trace
-          echo "FIREBIRD_TRACE_BINARY=$RUNNER_TEMP/firebirdotel-trace" >> "$GITHUB_ENV"
       # MON$ snapshots and first-use Profiler setup share one Firebird database.
       # Run packages sequentially to avoid cross-process server lock waits.
       - run: go test -race -p 1 ./...
@@ -50,5 +46,5 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Verify unsupported collector and portable input handling
-        run: go test ./trace -run 'TestUnsupportedWindowsCollector|TestEncodedWorkerConfigurationBound'
+      - name: Verify portable collector lifecycle
+        run: go test ./trace -run 'TestRuntime|TestEventEncoding'

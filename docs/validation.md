@@ -15,8 +15,6 @@ docker exec -i firebirdotel-test /opt/firebird/bin/isql -b \
   -user SYSDBA -password synthetic-test-only /var/lib/firebird/data/otel.fdb \
   < testdata/firebird5/schema.sql
 export FIREBIRD_TEST_DSN='SYSDBA:synthetic-test-only@localhost:3050/var/lib/firebird/data/otel.fdb'
-go build -o /tmp/firebirdotel-trace ./cmd/firebirdotel-trace
-export FIREBIRD_TRACE_BINARY=/tmp/firebirdotel-trace
 go test -race -p 1 -count=1 ./...
 go vet ./...
 go mod verify
@@ -28,8 +26,7 @@ The `-p 1` flag runs packages sequentially: the MON$ tests and first-use Profile
 setup share one database and can otherwise block each other on server locks.
 Unit tests without a live database do not need this flag.
 
-CI automates the same fixture/worker setup and uses 50,000 fuzz iterations per
-target, avoiding short wall-clock deadlines during worker shutdown. Fuzzing
+CI automates the same fixture and uses 50,000 fuzz iterations per target. Fuzzing
 checks panic safety and size invariants; golden canary tests separately check privacy.
 The generated capability adapters can be reproduced with `go generate ./...`.
 
@@ -38,7 +35,7 @@ environment setting; SQL/bind/DSN/error canaries; exact error identity and safe 
 filtered/unsampled parent isolation; prepared concurrency; ErrSkip fallback; Rows
 EOF/early close/error and multiple result sets; optional interfaces and Raw; pool
 metric unregister; bounded caches/cycles/invalidation; fresh, scoped MON$ transactions;
-Trace parsing, recursion, gaps, queue saturation and bounded process shutdown. Repeated pool opening/closing checks global registration
+Trace parsing, recursion, gaps, queue saturation and bounded context-aware shutdown. Repeated pool opening/closing checks global registration
 and metric callback cleanup; a stalled synchronous exporter checks execution count,
 error identity and safe output after release.
 
@@ -61,14 +58,13 @@ regressions cover single connector-factory invocation, untouched lazy results,
 connected typed package scopes, fully ordered bounded dependency reads, invisible
 MON$ targets, multiline SQL comments/literals/blank lines, forged headers in literals,
 quoted trigger names containing ` FOR `, forged table headings in SQL comments,
-maximum JSON-expanded worker input, transaction cancellation with direct/prepared
+bounded collector configuration, transaction cancellation with direct/prepared
 queries, cancellation-independent completion, one-shot result-set probes and custom
 driver package names containing `otelsql`. Further tests cover explicit hostless
 ports, Firebird comparison aliases and bounded array subscripts, SAVEPOINT operations,
 normal Commit/Rollback with open direct/prepared rows versus explicit Close, missing
-statement scope on the real server, literal ellipses, and malformed/oversized workers
-that ignore shutdown. A separate Windows CI job executes the pre-launch platform
-rejection and encoded-input tests. Later review regressions also cover malformed
+statement scope on the real server, literal ellipses, and in-process Trace lifecycle
+errors. A separate Windows CI job executes the portable collector unit tests. Later review regressions also cover malformed
 UTF-8 connection fields, lateral derived tables, UNKNOWN literals, optional connector
 cleanup/error identity, compiled nested PSQL in a live lock-wait snapshot, precise
 parameter metadata, recovery after sanitizer token-limit failures, and a native
@@ -105,17 +101,17 @@ go build -o /tmp/firebirdotel-benchmark ./examples/benchmark
 Set the two environment variables above. Each process warms up five queries. Allocation
 and byte deltas cover the measured loop and diagnostic cleanup; startup/warmup are
 excluded. CPU/RSS from `time` cover the whole process, including startup, proxy and JSON
-export, and do not independently isolate the Trace helper's resident memory. Trace mode waits for warm-up procedure finishes, completely stops/drains that worker,
-then starts a fresh worker before resetting counters. This process boundary prevents
+export. Trace mode waits for warm-up procedure finishes, completely stops/drains that collector,
+then starts a fresh collector before resetting counters. This lifecycle boundary prevents
 late warm-up statement finishes from entering the measured phase. It then waits for
 the measured procedure finishes before stopping; measured shutdown/control traffic
-is included, while both worker startups are outside the measured loop. Metrics size is
+is included, while both collector startups are outside the measured loop. Metrics size is
 one final JSON snapshot, not bytes per query or an OTLP wire size.
 
-**Allocation columns and JSON fields cover the benchmark process only.** In Trace
-mode they exclude the helper's driver, parsing and JSON encoding allocations. The
-output explicitly reports `allocation_scope=benchmark_process_only`. These columns
-cannot compare complete Trace memory cost against in-process metadata/MON$ costs.
+**Allocation columns and JSON fields cover the benchmark process only.** With the
+v0.9.21 collector they include the in-process Trace driver, parsing and JSON encoding.
+The table below predates that migration, so its Trace allocation/RSS row is historical
+and must be remeasured before using it for a current comparison.
 
 ### Mock Exec, no-op providers (three runs)
 

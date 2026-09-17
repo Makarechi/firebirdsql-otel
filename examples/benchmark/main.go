@@ -196,7 +196,7 @@ func run() error {
 	warmupCount := 5
 	if *mode == "trace" {
 		// A procedure finish can precede buffered statement-finish records. Stop and
-		// fully drain the warm-up worker before opening a fresh measured stream.
+		// fully drain the warm-up collector before opening a fresh measured stream.
 		extra, err = restartTraceAfterWarmup(extra, func() (*extras, error) { return newExtras(ctx, *mode, dsn, db) })
 		if err != nil {
 			return err

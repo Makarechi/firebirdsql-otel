@@ -6,7 +6,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/Makarechi/firebirdsql-otel/internal/sqltext"
-	servertrace "github.com/Makarechi/firebirdsql-otel/trace"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
@@ -47,10 +46,15 @@ type ClientDiagnosticsConfig struct {
 	Filter func(context.Context, Operation) bool
 }
 type Operation struct{ Method, Name, Summary, Procedure string }
+type ServerTrace interface {
+	Register(trace.SpanContext) string
+	Bind(string, trace.SpanContext)
+	Discard(string)
+}
 type Config struct {
 	// ServerTrace optionally associates sampled operations with a separately started
 	// server collector. It adds a reserved session marker query before execution.
-	ServerTrace    *servertrace.SpanRuntime
+	ServerTrace    ServerTrace
 	Profile        Profile
 	SQL            SQLPolicy
 	Connection     ConnectionAttributes

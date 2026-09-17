@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/XSAM/otelsql v0.42.0
-	github.com/nakagami/firebirdsql v0.9.20
+	github.com/nakagami/firebirdsql v0.9.21
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/metric v1.44.0
 	go.opentelemetry.io/otel/sdk v1.44.0
