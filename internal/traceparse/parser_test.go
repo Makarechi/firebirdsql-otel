@@ -279,6 +279,19 @@ func TestTraceSectionsRemainDistinctFromSQL(t *testing.T) {
 		}
 	})
 
+	t.Run("performance-shaped row limit expression", func(t *testing.T) {
+		for _, keyword := range []string{"FIRST", "SKIP"} {
+			p := New()
+			sql := "CREATE VIEW V AS SELECT " + keyword + "\n1 ms\nFROM RDB$DATABASE"
+			wire := record("EXECUTE_STATEMENT_START", "Statement 1:\n---\n"+sql) +
+				record("EXECUTE_STATEMENT_FINISH", "Statement 1:\n---\n"+sql+"\n      6 ms, 2 read(s)") + record("TRACE_FINI", "")
+			events := p.Feed(wire)
+			if len(events) != 2 || !strings.Contains(events[1].SQL, keyword+" ? MS") || events[1].DurationMS != 6 || events[1].Reads != 2 || events[1].Incomplete {
+				t.Fatal("row-limit expression became performance metadata", keyword, events)
+			}
+		}
+	})
+
 	t.Run("performance-shaped union expression", func(t *testing.T) {
 		p := New()
 		sql := "CREATE VIEW V AS SELECT\n1\nUNION ALL\n2 ms\nFROM RDB$DATABASE"
@@ -384,6 +397,16 @@ func TestTraceOutputPreservesBoundedMetadata(t *testing.T) {
 		events := p.Feed(record("EXECUTE_PROCEDURE_START", "Procedure P:") + record("EXECUTE_PROCEDURE_FINISH", body) + record("TRACE_FINI", ""))
 		if len(events) != 2 || len(events[1].Tables) != 1 || events[1].Tables[0].Name != "T" || events[1].Tables[0].Natural != 10000000000 || events[1].Incomplete {
 			t.Fatal("wide table counter shifted into relation name", events)
+		}
+	})
+
+	t.Run("adjacent wide table counters", func(t *testing.T) {
+		p := New()
+		row := fmt.Sprintf("%-32s%s%s%10s%10s%10s%10s%10s%10s", "T", "10000000000", "20000000000", "", "", "", "", "", "")
+		body := "Procedure P:\n1 ms\nTable                              Natural     Index    Update    Insert    Delete   Backout     Purge   Expunge\n" + strings.Repeat("*", 112) + "\n" + row
+		events := p.Feed(record("EXECUTE_PROCEDURE_START", "Procedure P:") + record("EXECUTE_PROCEDURE_FINISH", body) + record("TRACE_FINI", ""))
+		if len(events) != 2 || len(events[1].Tables) != 0 || !events[1].Incomplete {
+			t.Fatal("ambiguous adjacent counters were accepted", events)
 		}
 	})
 

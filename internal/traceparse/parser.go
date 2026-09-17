@@ -351,11 +351,28 @@ func tableCounterRow(line string, minimumNameWidth int) (Table, bool) {
 		values  [8]int64
 	}
 	var candidates []candidate
-	var parse func(int, int, [8]int64)
-	parse = func(field, end int, values [8]int64) {
+	var parse func(int, int, [8]int64, [8]int)
+	parse = func(field, end int, values [8]int64, digits [8]int) {
 		if field < 0 {
 			name := strings.TrimSpace(line[:end])
-			if end >= minimumNameWidth && metadataName(name) {
+			ambiguous := false
+			for i := 0; i < len(digits)-1; i++ {
+				if digits[i] > 0 && digits[i+1] > 0 && (digits[i] > 10 || digits[i+1] > 10) {
+					ambiguous = true
+					break
+				}
+			}
+			if end > minimumNameWidth && line[minimumNameWidth-1] == ' ' {
+				counterOverflow := true
+				for _, b := range []byte(line[minimumNameWidth:end]) {
+					if b < '0' || b > '9' {
+						counterOverflow = false
+						break
+					}
+				}
+				ambiguous = ambiguous || counterOverflow
+			}
+			if !ambiguous && end >= minimumNameWidth && metadataName(name) {
 				candidates = append(candidates, candidate{end, values})
 			}
 			return
@@ -366,11 +383,13 @@ func tableCounterRow(line string, minimumNameWidth int) (Table, bool) {
 		fixed := line[end-10 : end]
 		trimmed := strings.TrimSpace(fixed)
 		if trimmed == "" {
-			parse(field-1, end-10, values)
+			parse(field-1, end-10, values, digits)
 		} else if n, err := strconv.ParseInt(trimmed, 10, 64); err == nil && strings.TrimLeft(fixed, " ") == trimmed {
 			next := values
 			next[field] = n
-			parse(field-1, end-10, next)
+			nextDigits := digits
+			nextDigits[field] = len(trimmed)
+			parse(field-1, end-10, next, nextDigits)
 		}
 		start := end
 		for start > 0 && line[start-1] >= '0' && line[start-1] <= '9' {
@@ -380,11 +399,13 @@ func tableCounterRow(line string, minimumNameWidth int) (Table, bool) {
 			if n, err := strconv.ParseInt(line[start:end], 10, 64); err == nil {
 				next := values
 				next[field] = n
-				parse(field-1, start, next)
+				nextDigits := digits
+				nextDigits[field] = end - start
+				parse(field-1, start, next, nextDigits)
 			}
 		}
 	}
-	parse(7, len(line), [8]int64{})
+	parse(7, len(line), [8]int64{}, [8]int{})
 	if len(candidates) == 0 {
 		return Table{}, false
 	}

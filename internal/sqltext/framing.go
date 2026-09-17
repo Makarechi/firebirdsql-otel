@@ -207,7 +207,7 @@ func StatementMayEnd(s string) bool {
 		i += size
 	}
 	switch last {
-	case "SELECT", "FROM", "WHERE", "JOIN", "ON", "AS", "BY", "HAVING", "ORDER", "GROUP", "UNION", "ALL", "DISTINCT", "INTERSECT", "EXCEPT", "INTO", "VALUES", "SET", "RETURNING", "WHEN", "THEN", "ELSE", "AND", "OR", "NOT", "=", "<", ">", "!", "^", "~", "+", "-", "*", "/", "|", ":", ",", ".", "(", "[":
+	case "SELECT", "FIRST", "SKIP", "FROM", "WHERE", "JOIN", "ON", "AS", "BY", "HAVING", "ORDER", "GROUP", "UNION", "ALL", "DISTINCT", "INTERSECT", "EXCEPT", "INTO", "VALUES", "SET", "RETURNING", "WHEN", "THEN", "ELSE", "AND", "OR", "NOT", "=", "<", ">", "!", "^", "~", "+", "-", "*", "/", "|", ":", ",", ".", "(", "[":
 		return false
 	default:
 		return true

@@ -33,7 +33,7 @@ func TestStatementMayEnd(t *testing.T) {
 	if sql := "SELECT " + strings.Repeat("1+", 2200) + "1"; !StatementMayEnd(sql) {
 		t.Fatal("sanitizer token limit affected framing")
 	}
-	for _, sql := range []string{"SELECT", "CREATE VIEW V AS SELECT", "CREATE VIEW V AS SELECT 1 UNION ALL", "SELECT A,", "UPDATE T SET"} {
+	for _, sql := range []string{"SELECT", "CREATE VIEW V AS SELECT", "CREATE VIEW V AS SELECT FIRST", "CREATE VIEW V AS SELECT SKIP", "CREATE VIEW V AS SELECT 1 UNION ALL", "SELECT A,", "UPDATE T SET"} {
 		if StatementMayEnd(sql) {
 			t.Fatal("incomplete prefix accepted", sql)
 		}
