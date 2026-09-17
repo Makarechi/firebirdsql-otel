@@ -50,12 +50,14 @@ var newTraceManager = func(address, user, password string) (traceManager, error)
 }
 
 type Runtime struct {
-	events    chan Event
-	done      chan struct{}
-	cancel    context.CancelFunc
-	session   traceSession
-	closeOnce sync.Once
-	closeDone chan struct{}
+	events      chan Event
+	done        chan struct{}
+	cancel      context.CancelFunc
+	session     traceSession
+	closeOnce   sync.Once
+	closeDone   chan struct{}
+	discard     chan struct{}
+	discardOnce sync.Once
 
 	mu       sync.Mutex
 	err      error
@@ -106,6 +108,7 @@ func Start(ctx context.Context, c Config) (*Runtime, error) {
 		cancel:    cancel,
 		session:   session,
 		closeDone: make(chan struct{}),
+		discard:   make(chan struct{}),
 	}
 	r.events <- Event{Source: "trace", Correlation: "unmatched", Kind: "lifecycle", Phase: "ready"}
 	go r.run(runCtx)
@@ -149,7 +152,14 @@ func (r *Runtime) run(ctx context.Context) {
 	emit := func(events []Event) bool {
 		for _, event := range events {
 			select {
+			case <-r.discard:
+				continue
+			default:
+			}
+			select {
 			case r.events <- event:
+			case <-r.discard:
+				continue
 			case <-ctx.Done():
 				return false
 			}
@@ -229,6 +239,7 @@ func (r *Runtime) Shutdown(ctx context.Context) error {
 	r.mu.Lock()
 	r.stopping = true
 	r.mu.Unlock()
+	r.discardOnce.Do(func() { close(r.discard) })
 	r.requestClose(ctx)
 	select {
 	case <-r.done:

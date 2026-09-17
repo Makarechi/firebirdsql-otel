@@ -113,6 +113,24 @@ func TestRuntimeStartsAndShutsDownInProcess(t *testing.T) {
 	}
 }
 
+func TestRuntimeShutdownDoesNotRequireEventConsumer(t *testing.T) {
+	session := newFakeTraceSession()
+	manager := &fakeTraceManager{session: session}
+	useFakeManager(t, manager)
+	r, err := Start(t.Context(), Config{Address: "localhost", User: "test", Database: "/db", Name: "test", Buffer: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The ready event fills the only queue slot. This additional parser event
+	// blocks delivery until Shutdown switches the runtime to discard mode.
+	session.chunks <- "2026-09-17T08:00:00.0000 (1:0x1) UNSUPPORTED_EVENT"
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	if err := r.Shutdown(ctx); err != nil {
+		t.Fatal("shutdown depended on draining Events", err)
+	}
+}
+
 func TestRuntimeStartupAndShutdownRespectContexts(t *testing.T) {
 	t.Run("startup", func(t *testing.T) {
 		manager := &fakeTraceManager{session: newFakeTraceSession(), waitForCancel: true}

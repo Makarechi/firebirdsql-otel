@@ -153,6 +153,29 @@ func TestServerSpanBoundsAndStartup(t *testing.T) {
 	}
 }
 
+func TestGapDiscardsPendingMarkerRegistrations(t *testing.T) {
+	s, err := NewSpans(SpanConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.running = true
+	token := s.Register(otrace.SpanContext{})
+	if token == "" {
+		t.Fatal("registration failed")
+	}
+	r := &Runtime{events: make(chan Event), done: make(chan struct{})}
+	go s.consume(r)
+	r.events <- Event{Kind: "statement", Phase: "finish", ScopeToken: token, AttachmentID: 1, Timestamp: "2026-09-17T08:00:00.0000"}
+	r.events <- Event{Kind: "gap", Incomplete: true}
+	r.events <- Event{} // Barrier: the gap has been handled before this receive.
+	if _, ok := s.lookup(token); ok {
+		t.Fatal("gap retained a pending marker registration")
+	}
+	close(r.done)
+	close(r.events)
+	<-s.done
+}
+
 func TestServerSpanExportsAllPerformanceCountersAndMarkerTiming(t *testing.T) {
 	recorder := tracetest.NewSpanRecorder()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))

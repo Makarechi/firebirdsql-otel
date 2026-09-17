@@ -330,6 +330,9 @@ func (s *SpanRuntime) consume(r *Runtime) {
 				for tree := range trees {
 					drop(tree, "gap")
 				}
+				for _, p := range pending {
+					s.Discard(p.token)
+				}
 				clear(pending)
 				continue
 			}
