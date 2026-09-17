@@ -3,6 +3,7 @@ module github.com/Makarechi/firebirdsql-otel
 go 1.25.0
 
 require (
+	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/XSAM/otelsql v0.42.0
 	github.com/nakagami/firebirdsql v0.9.20
 	go.opentelemetry.io/otel v1.44.0
