@@ -221,3 +221,42 @@ func TestServerScopeReusesMarkerAfterErrSkip(t *testing.T) {
 		t.Fatalf("marker was not reused: markers=%d calls=%d completed=%d bound=%d discarded=%d", raw.markers, stmt.calls, server.completed, server.bound, server.discarded)
 	}
 }
+
+func TestServerScopeDiscardsPreservedFallbackMarker(t *testing.T) {
+	for _, mode := range []string{"filtered", "closed"} {
+		t.Run(mode, func(t *testing.T) {
+			server := &trackingMarkerTrace{}
+			cfg := SafeConfig()
+			cfg.ServerTrace = server
+			calls := 0
+			if mode == "filtered" {
+				cfg.Client.Filter = func(context.Context, Operation) bool {
+					calls++
+					return calls == 1
+				}
+			}
+			tel, err := newTelemetry(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw := &markerConn{businessErr: driver.ErrSkip}
+			conn := &connState{raw: raw, t: tel}
+			query := "execute procedure P(?)"
+			if _, err := conn.ExecContext(t.Context(), query, nil); err != driver.ErrSkip {
+				t.Fatal(err)
+			}
+			if mode == "filtered" {
+				stmt := &fallbackExecStmt{}
+				wrapped := &stmtState{raw: stmt, t: tel, d: tel.describe(query), conn: conn}
+				if _, err := wrapped.ExecContext(t.Context(), nil); err != nil || stmt.calls != 1 {
+					t.Fatal("filtered fallback changed execution", err, stmt.calls)
+				}
+			} else if err := conn.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if server.discarded != 1 || server.bound != 0 {
+				t.Fatal("preserved marker was retained", server)
+			}
+		})
+	}
+}

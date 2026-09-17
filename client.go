@@ -23,7 +23,10 @@ type connState struct {
 }
 
 func (c *connState) Unwrap() driver.Conn { return c.raw }
-func (c *connState) Close() error        { return c.raw.Close() }
+func (c *connState) Close() error {
+	c.discardFallbackToken()
+	return c.raw.Close()
+}
 func (c *connState) Prepare(q string) (driver.Stmt, error) {
 	return c.prepare(context.Background(), q, false)
 }

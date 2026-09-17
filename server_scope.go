@@ -22,9 +22,14 @@ func (c *connState) serverScope(op *operation, allowFallback bool) {
 	}
 	c.txMu.Lock()
 	if allowFallback && c.fallbackToken != "" {
-		op.serverToken = c.fallbackToken
+		token := c.fallbackToken
 		c.fallbackToken = ""
 		c.txMu.Unlock()
+		if !op.enabled {
+			s.Discard(token)
+			return
+		}
+		op.serverToken = token
 		return
 	}
 	staleFallback := c.fallbackToken
