@@ -229,7 +229,7 @@ func (r *Runtime) Shutdown(ctx context.Context) error {
 	case <-r.done:
 		r.mu.Lock()
 		defer r.mu.Unlock()
-		return r.err
+		return errors.Join(r.err, ctx.Err())
 	case <-ctx.Done():
 		r.cancel()
 		return ctx.Err()

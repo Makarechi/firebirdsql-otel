@@ -17,15 +17,20 @@ import (
 )
 
 type fakeTraceManager struct {
-	session *fakeTraceSession
-	name    string
-	config  string
-	ctxErr  error
-	err     error
+	session       *fakeTraceSession
+	name          string
+	config        string
+	ctxErr        error
+	err           error
+	waitForCancel bool
 }
 
 func (m *fakeTraceManager) StartWithNameContext(ctx context.Context, name, config string) (traceSession, error) {
 	m.name, m.config, m.ctxErr = name, config, ctx.Err()
+	if m.waitForCancel {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	if m.err != nil {
 		return nil, m.err
 	}
@@ -33,11 +38,14 @@ func (m *fakeTraceManager) StartWithNameContext(ctx context.Context, name, confi
 }
 
 type fakeTraceSession struct {
-	chunks    chan string
-	closed    chan struct{}
-	waitErr   error
-	closeErr  error
-	closeOnce sync.Once
+	chunks       chan string
+	closed       chan struct{}
+	waitErr      error
+	closeErr     error
+	closeOnce    sync.Once
+	startOnce    sync.Once
+	closeStarted chan struct{}
+	blockClose   bool
 }
 
 func newFakeTraceSession() *fakeTraceSession {
@@ -61,8 +69,17 @@ func (s *fakeTraceSession) WaitStringsContext(ctx context.Context, result chan s
 	}
 }
 
-func (s *fakeTraceSession) CloseContext(context.Context) error {
+func (s *fakeTraceSession) CloseContext(ctx context.Context) error {
+	if s.closeStarted != nil {
+		s.startOnce.Do(func() { close(s.closeStarted) })
+	}
+	if s.blockClose {
+		<-ctx.Done()
+	}
 	s.closeOnce.Do(func() { close(s.closed) })
+	if s.blockClose {
+		return ctx.Err()
+	}
 	return s.closeErr
 }
 
@@ -94,6 +111,41 @@ func TestRuntimeStartsAndShutsDownInProcess(t *testing.T) {
 	if _, ok := <-r.Events(); ok {
 		t.Fatal("events remained open after shutdown")
 	}
+}
+
+func TestRuntimeStartupAndShutdownRespectContexts(t *testing.T) {
+	t.Run("startup", func(t *testing.T) {
+		manager := &fakeTraceManager{session: newFakeTraceSession(), waitForCancel: true}
+		useFakeManager(t, manager)
+		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+		defer cancel()
+		if r, err := Start(ctx, Config{Address: "localhost", User: "test", Database: "/db", Name: "test"}); r != nil || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatal("startup context was not preserved", err)
+		}
+	})
+
+	t.Run("shutdown", func(t *testing.T) {
+		session := newFakeTraceSession()
+		session.blockClose = true
+		session.closeStarted = make(chan struct{})
+		manager := &fakeTraceManager{session: session}
+		useFakeManager(t, manager)
+		r, err := Start(t.Context(), Config{Address: "localhost", User: "test", Database: "/db", Name: "test"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		<-r.Events()
+		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+		defer cancel()
+		if err = r.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatal("shutdown context was not preserved", err)
+		}
+		select {
+		case <-session.closeStarted:
+		default:
+			t.Fatal("session cleanup was not attempted")
+		}
+	})
 }
 
 func TestRuntimeReportsSafeStreamAndCleanupErrors(t *testing.T) {
