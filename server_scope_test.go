@@ -213,7 +213,7 @@ func TestServerScopeReusesMarkerAfterErrSkip(t *testing.T) {
 		t.Fatal("fast path did not return ErrSkip", err)
 	}
 	stmt := &fallbackExecStmt{}
-	wrapped := &stmtState{raw: stmt, t: tel, d: tel.describe(query), conn: conn}
+	wrapped := &stmtState{raw: stmt, t: tel, d: tel.describe(query), conn: conn, serverToken: conn.takeFallbackToken(query)}
 	if _, err := wrapped.ExecContext(t.Context(), []driver.NamedValue{{Ordinal: 1, Value: 1}}); err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +223,7 @@ func TestServerScopeReusesMarkerAfterErrSkip(t *testing.T) {
 }
 
 func TestServerScopeDiscardsPreservedFallbackMarker(t *testing.T) {
-	for _, mode := range []string{"filtered", "closed"} {
+	for _, mode := range []string{"filtered", "statement_closed", "connection_closed"} {
 		t.Run(mode, func(t *testing.T) {
 			server := &trackingMarkerTrace{}
 			cfg := SafeConfig()
@@ -247,12 +247,19 @@ func TestServerScopeDiscardsPreservedFallbackMarker(t *testing.T) {
 			}
 			if mode == "filtered" {
 				stmt := &fallbackExecStmt{}
-				wrapped := &stmtState{raw: stmt, t: tel, d: tel.describe(query), conn: conn}
+				wrapped := &stmtState{raw: stmt, t: tel, d: tel.describe(query), conn: conn, serverToken: conn.takeFallbackToken(query)}
 				if _, err := wrapped.ExecContext(t.Context(), nil); err != nil || stmt.calls != 1 {
 					t.Fatal("filtered fallback changed execution", err, stmt.calls)
 				}
-			} else if err := conn.Close(); err != nil {
-				t.Fatal(err)
+			} else if mode == "statement_closed" {
+				stmt := &stmtState{raw: &fallbackExecStmt{}, t: tel, d: tel.describe(query), conn: conn, serverToken: conn.takeFallbackToken(query)}
+				if err := stmt.Close(); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := conn.Close(); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if server.discarded != 1 || server.bound != 0 {
 				t.Fatal("preserved marker was retained", server)

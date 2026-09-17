@@ -353,6 +353,11 @@ func (s *SpanRuntime) consume(r *Runtime) {
 				if e.Phase != "finish" {
 					continue
 				}
+				if e.Sequence == 0 || e.Incomplete || e.Correlation == "unmatched" {
+					s.Discard(e.ScopeToken)
+					invalidate("unmatched_marker")
+					continue
+				}
 				delete(pending, e.AttachmentID)
 				anchor, err := time.Parse("2006-01-02T15:04:05.999999999", e.Timestamp)
 				if _, ok := s.lookup(e.ScopeToken); ok && err == nil && e.AttachmentID > 0 && len(pending) < s.c.MaxPending {

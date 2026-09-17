@@ -40,6 +40,7 @@ func TestServerSpanParentageAndIsolation(t *testing.T) {
 			marker.Kind = "statement"
 			marker.Phase = "finish"
 			marker.ScopeToken = token
+			marker.Sequence = 99
 			r.events <- marker
 			e.Kind = "statement"
 			e.Name = "EXECUTE PROCEDURE OUTER"
@@ -168,7 +169,7 @@ func TestGapDiscardsPendingMarkerRegistrations(t *testing.T) {
 	}
 	r := &Runtime{events: make(chan Event), done: make(chan struct{})}
 	go s.consume(r)
-	r.events <- Event{Kind: "statement", Phase: "finish", ScopeToken: token, AttachmentID: 1, Timestamp: "2026-09-17T08:00:00.0000"}
+	r.events <- Event{Kind: "statement", Phase: "finish", ScopeToken: token, Sequence: 99, Correlation: "heuristic", AttachmentID: 1, Timestamp: "2026-09-17T08:00:00.0000"}
 	r.events <- Event{Kind: "gap", Incomplete: true}
 	r.events <- Event{} // Barrier: the gap has been handled before this receive.
 	if _, ok := s.lookup(token); ok {
@@ -191,12 +192,32 @@ func TestUnmatchedExecutionDiscardsActiveTree(t *testing.T) {
 	}
 	r := &Runtime{events: make(chan Event), done: make(chan struct{})}
 	go s.consume(r)
-	r.events <- Event{Kind: "statement", Phase: "finish", ScopeToken: token, AttachmentID: 1, Timestamp: "2026-09-17T08:00:00.0000"}
+	r.events <- Event{Kind: "statement", Phase: "finish", ScopeToken: token, Sequence: 99, Correlation: "heuristic", AttachmentID: 1, Timestamp: "2026-09-17T08:00:00.0000"}
 	r.events <- Event{Kind: "statement", Phase: "start", Name: "SELECT T", Sequence: 1, AttachmentID: 1, TransactionID: 2, Timestamp: "2026-09-17T08:00:00.0010"}
 	r.events <- Event{Kind: "procedure", Phase: "finish", Incomplete: true, AttachmentID: 1, TransactionID: 2}
 	r.events <- Event{} // Barrier: the unmatched event has been handled.
 	if _, ok := s.lookup(token); ok {
 		t.Fatal("unmatched execution retained an active tree")
+	}
+	close(r.done)
+	close(r.events)
+	<-s.done
+}
+
+func TestUnmatchedMarkerCannotCreateServerTree(t *testing.T) {
+	s, err := NewSpans(SpanConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.running = true
+	token := s.Register(otrace.SpanContext{})
+	r := &Runtime{events: make(chan Event), done: make(chan struct{})}
+	go s.consume(r)
+	r.events <- Event{Kind: "statement", Phase: "finish", ScopeToken: token, AttachmentID: 1, Incomplete: true, Correlation: "unmatched", Timestamp: "2026-09-17T08:00:00.0000"}
+	r.events <- Event{Kind: "statement", Phase: "start", Name: "SELECT T", Sequence: 1, AttachmentID: 1, TransactionID: 2, Timestamp: "2026-09-17T08:00:00.0010"}
+	r.events <- Event{} // Barrier: the root statement has been handled.
+	if _, ok := s.lookup(token); ok {
+		t.Fatal("unmatched marker registration was retained")
 	}
 	close(r.done)
 	close(r.events)
@@ -221,6 +242,7 @@ func TestPendingMarkerWaitsForRootStatement(t *testing.T) {
 	base := Event{Source: "trace", Correlation: "heuristic", Timestamp: "2026-09-17T08:00:00.0000", AttachmentID: 1, TransactionID: 2}
 	marker := base
 	marker.Kind, marker.Phase, marker.ScopeToken = "statement", "finish", token
+	marker.Sequence = 99
 	r.events <- marker
 	trigger := base
 	trigger.Kind, trigger.Name, trigger.Phase, trigger.Sequence = "trigger", "ON_COMMIT", "start", 1

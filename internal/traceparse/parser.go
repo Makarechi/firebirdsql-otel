@@ -303,28 +303,8 @@ func (p *Parser) consume(line string) []Event {
 		return nil
 	}
 	if p.tableWidth >= 32 && len(line) >= p.tableWidth+80 && !strings.HasPrefix(line, "***") {
-		fieldsStart := len(line) - 80
-		name := strings.TrimSpace(line[:fieldsStart])
-		if metadataName(name) {
-			table := Table{Name: name}
-			values := []*int64{&table.Natural, &table.Index, &table.Update, &table.Insert, &table.Delete, &table.Backout, &table.Purge, &table.Expunge}
-			valid := true
-			for i, v := range values {
-				s := strings.TrimSpace(line[fieldsStart+i*10 : fieldsStart+(i+1)*10])
-				if s != "" {
-					n, err := strconv.ParseInt(s, 10, 64)
-					if err != nil {
-						valid = false
-						break
-					}
-					*v = n
-				}
-			}
-			if valid && len(e.Tables) < 64 {
-				e.Tables = append(e.Tables, table)
-			} else {
-				e.Incomplete = true
-			}
+		if table, ok := tableCounterRow(line, p.tableWidth); ok && len(e.Tables) < 64 {
+			e.Tables = append(e.Tables, table)
 		} else {
 			e.Incomplete = true
 		}
@@ -363,6 +343,60 @@ func (p *Parser) consume(line string) []Event {
 		p.sql.WriteByte('\n')
 	}
 	return nil
+}
+
+func tableCounterRow(line string, minimumNameWidth int) (Table, bool) {
+	type candidate struct {
+		nameLen int
+		values  [8]int64
+	}
+	var candidates []candidate
+	var parse func(int, int, [8]int64)
+	parse = func(field, end int, values [8]int64) {
+		if field < 0 {
+			name := strings.TrimSpace(line[:end])
+			if end >= minimumNameWidth && metadataName(name) {
+				candidates = append(candidates, candidate{end, values})
+			}
+			return
+		}
+		if end < 10 {
+			return
+		}
+		fixed := line[end-10 : end]
+		trimmed := strings.TrimSpace(fixed)
+		if trimmed == "" {
+			parse(field-1, end-10, values)
+		} else if n, err := strconv.ParseInt(trimmed, 10, 64); err == nil && strings.TrimLeft(fixed, " ") == trimmed {
+			next := values
+			next[field] = n
+			parse(field-1, end-10, next)
+		}
+		start := end
+		for start > 0 && line[start-1] >= '0' && line[start-1] <= '9' {
+			start--
+		}
+		if end-start > 10 {
+			if n, err := strconv.ParseInt(line[start:end], 10, 64); err == nil {
+				next := values
+				next[field] = n
+				parse(field-1, start, next)
+			}
+		}
+	}
+	parse(7, len(line), [8]int64{})
+	if len(candidates) == 0 {
+		return Table{}, false
+	}
+	best := candidates[0]
+	for _, c := range candidates[1:] {
+		if c.nameLen < best.nameLen {
+			best = c
+		}
+	}
+	name := strings.TrimSpace(line[:best.nameLen])
+	v := best.values
+	return Table{Name: name, Natural: v[0], Index: v[1], Update: v[2], Insert: v[3], Delete: v[4], Backout: v[5], Purge: v[6], Expunge: v[7]}, true
 }
 func (p *Parser) finish() *Event {
 	e := p.current

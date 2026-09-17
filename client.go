@@ -16,6 +16,7 @@ type connState struct {
 	serverRows    int
 	serverToken   string
 	fallbackToken string
+	fallbackQuery [32]byte
 	raw           driver.Conn
 	t             *telemetry
 	txMu          sync.Mutex
@@ -48,7 +49,7 @@ func (c *connState) prepare(ctx context.Context, q string, withCtx bool) (driver
 		c.discardFallbackToken()
 		return nil, err
 	}
-	return wrapStmt(&stmtState{raw: s, t: c.t, d: d, conn: c}), nil
+	return wrapStmt(&stmtState{raw: s, t: c.t, d: d, conn: c, serverToken: c.takeFallbackToken(q)}), nil
 }
 func (c *connState) Begin() (driver.Tx, error) {
 	return c.begin(context.Background(), driver.TxOptions{}, false)
@@ -77,35 +78,35 @@ func (c *connState) begin(ctx context.Context, opts driver.TxOptions, withCtx bo
 func (c *connState) Exec(q string, args []driver.Value) (driver.Result, error) {
 	op := c.t.start(context.Background(), "exec", c.t.describe(q))
 	op.fallback = true // database/sql retries only these connection fast paths.
-	c.serverScope(&op, false)
+	c.serverScope(&op)
 	r, err := c.raw.(driver.Execer).Exec(q, args)
-	c.preserveFallbackToken(&op, err)
+	c.preserveFallbackToken(&op, err, q)
 	c.t.finish(op, err, resultAttributes(r))
 	return r, err
 }
 func (c *connState) ExecContext(ctx context.Context, q string, args []driver.NamedValue) (driver.Result, error) {
 	op := c.t.start(ctx, "exec", c.t.describe(q))
 	op.fallback = true // database/sql retries only these connection fast paths.
-	c.serverScope(&op, false)
+	c.serverScope(&op)
 	r, err := c.raw.(driver.ExecerContext).ExecContext(ctx, q, args)
-	c.preserveFallbackToken(&op, err)
+	c.preserveFallbackToken(&op, err, q)
 	c.t.finish(op, err, resultAttributes(r))
 	return r, err
 }
 func (c *connState) Query(q string, args []driver.Value) (driver.Rows, error) {
 	op := c.t.start(context.Background(), "query", c.t.describe(q))
 	op.fallback = true // database/sql retries only these connection fast paths.
-	c.serverScope(&op, false)
+	c.serverScope(&op)
 	r, err := c.raw.(driver.Queryer).Query(q, args)
-	c.preserveFallbackToken(&op, err)
+	c.preserveFallbackToken(&op, err, q)
 	return c.queryResult(op, r, err)
 }
 func (c *connState) QueryContext(ctx context.Context, q string, args []driver.NamedValue) (driver.Rows, error) {
 	op := c.t.start(ctx, "query", c.t.describe(q))
 	op.fallback = true // database/sql retries only these connection fast paths.
-	c.serverScope(&op, false)
+	c.serverScope(&op)
 	r, err := c.raw.(driver.QueryerContext).QueryContext(ctx, q, args)
-	c.preserveFallbackToken(&op, err)
+	c.preserveFallbackToken(&op, err, q)
 	return c.queryResult(op, r, err)
 }
 func (c *connState) Ping(ctx context.Context) error {
@@ -127,37 +128,42 @@ func (c *connState) CheckNamedValue(v *driver.NamedValue) error {
 
 type stmtBase interface{ driver.Stmt }
 type stmtState struct {
-	raw  driver.Stmt
-	t    *telemetry
-	d    description
-	conn *connState
+	raw         driver.Stmt
+	t           *telemetry
+	d           description
+	conn        *connState
+	serverMu    sync.Mutex
+	serverToken string
 }
 
-func (s *stmtState) Close() error  { return s.raw.Close() }
+func (s *stmtState) Close() error {
+	s.discardServerToken()
+	return s.raw.Close()
+}
 func (s *stmtState) NumInput() int { return s.raw.NumInput() }
 func (s *stmtState) Exec(args []driver.Value) (driver.Result, error) {
 	op := s.t.start(context.Background(), "exec", s.d)
-	s.conn.serverScope(&op, true)
+	s.serverScope(&op)
 	r, err := s.raw.Exec(args)
 	s.t.finish(op, err, resultAttributes(r))
 	return r, err
 }
 func (s *stmtState) ExecContext(ctx context.Context, args []driver.NamedValue) (driver.Result, error) {
 	op := s.t.start(ctx, "exec", s.d)
-	s.conn.serverScope(&op, true)
+	s.serverScope(&op)
 	r, err := s.raw.(driver.StmtExecContext).ExecContext(ctx, args)
 	s.t.finish(op, err, resultAttributes(r))
 	return r, err
 }
 func (s *stmtState) Query(args []driver.Value) (driver.Rows, error) {
 	op := s.t.start(context.Background(), "query", s.d)
-	s.conn.serverScope(&op, true)
+	s.serverScope(&op)
 	r, err := s.raw.Query(args)
 	return s.conn.queryResult(op, r, err)
 }
 func (s *stmtState) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
 	op := s.t.start(ctx, "query", s.d)
-	s.conn.serverScope(&op, true)
+	s.serverScope(&op)
 	r, err := s.raw.(driver.StmtQueryContext).QueryContext(ctx, args)
 	return s.conn.queryResult(op, r, err)
 }

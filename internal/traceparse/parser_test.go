@@ -279,6 +279,17 @@ func TestTraceSectionsRemainDistinctFromSQL(t *testing.T) {
 		}
 	})
 
+	t.Run("performance-shaped union expression", func(t *testing.T) {
+		p := New()
+		sql := "CREATE VIEW V AS SELECT\n1\nUNION ALL\n2 ms\nFROM RDB$DATABASE"
+		wire := record("EXECUTE_STATEMENT_START", "Statement 1:\n---\n"+sql) +
+			record("EXECUTE_STATEMENT_FINISH", "Statement 1:\n---\n"+sql+"\n      6 ms, 2 read(s)") + record("TRACE_FINI", "")
+		events := p.Feed(wire)
+		if len(events) != 2 || events[1].SQL != "CREATE VIEW V AS SELECT ? UNION ALL ? MS FROM RDB$DATABASE" || events[1].DurationMS != 6 || events[1].Reads != 2 || events[1].Incomplete {
+			t.Fatal("UNION expression became performance metadata", events)
+		}
+	})
+
 	t.Run("affected rows and terminal ddl performance", func(t *testing.T) {
 		p := New()
 		dml := "UPDATE T SET V = 1"
@@ -363,6 +374,16 @@ func TestTraceOutputPreservesBoundedMetadata(t *testing.T) {
 		events := p.Feed(record("EXECUTE_PROCEDURE_START", "Procedure P:") + record("EXECUTE_PROCEDURE_FINISH", body) + record("TRACE_FINI", ""))
 		if len(events) != 2 || len(events[1].Tables) != 1 || events[1].Tables[0].Name != name || events[1].Tables[0].Expunge != 8 || events[1].Incomplete {
 			t.Fatal("delimited table metadata lost", events)
+		}
+	})
+
+	t.Run("wide table counter", func(t *testing.T) {
+		p := New()
+		row := fmt.Sprintf("%-32s%d%10s%10s%10s%10s%10s%10s%10s", "T", int64(10000000000), "", "", "", "", "", "", "")
+		body := "Procedure P:\n1 ms\nTable                              Natural     Index    Update    Insert    Delete   Backout     Purge   Expunge\n" + strings.Repeat("*", 112) + "\n" + row
+		events := p.Feed(record("EXECUTE_PROCEDURE_START", "Procedure P:") + record("EXECUTE_PROCEDURE_FINISH", body) + record("TRACE_FINI", ""))
+		if len(events) != 2 || len(events[1].Tables) != 1 || events[1].Tables[0].Name != "T" || events[1].Tables[0].Natural != 10000000000 || events[1].Incomplete {
+			t.Fatal("wide table counter shifted into relation name", events)
 		}
 	})
 

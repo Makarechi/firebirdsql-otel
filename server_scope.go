@@ -1,6 +1,7 @@
 package firebirdotel
 
 import (
+	"crypto/sha256"
 	"database/sql/driver"
 	"io"
 
@@ -15,23 +16,12 @@ type markerCompletion interface {
 	MarkerComplete(string)
 }
 
-func (c *connState) serverScope(op *operation, allowFallback bool) {
+func (c *connState) serverScope(op *operation) {
 	s := c.t.c.ServerTrace
 	if s == nil {
 		return
 	}
 	c.txMu.Lock()
-	if allowFallback && c.fallbackToken != "" {
-		token := c.fallbackToken
-		c.fallbackToken = ""
-		c.txMu.Unlock()
-		if !op.enabled {
-			s.Discard(token)
-			return
-		}
-		op.serverToken = token
-		return
-	}
 	staleFallback := c.fallbackToken
 	c.fallbackToken = ""
 	if c.serverRows > 0 {
@@ -109,7 +99,7 @@ func (c *connState) serverScope(op *operation, allowFallback bool) {
 	c.txMu.Unlock()
 }
 
-func (c *connState) preserveFallbackToken(op *operation, err error) {
+func (c *connState) preserveFallbackToken(op *operation, err error, query string) {
 	if err != driver.ErrSkip || op.serverToken == "" {
 		return
 	}
@@ -117,11 +107,29 @@ func (c *connState) preserveFallbackToken(op *operation, err error) {
 	c.txMu.Lock()
 	stale := c.fallbackToken
 	c.fallbackToken = token
+	c.fallbackQuery = sha256.Sum256([]byte(query))
 	op.serverToken = ""
 	c.txMu.Unlock()
 	if stale != "" && stale != token {
 		c.t.c.ServerTrace.Discard(stale)
 	}
+}
+
+func (c *connState) takeFallbackToken(query string) string {
+	if c.t.c.ServerTrace == nil {
+		return ""
+	}
+	c.txMu.Lock()
+	token := c.fallbackToken
+	match := token != "" && c.fallbackQuery == sha256.Sum256([]byte(query))
+	c.fallbackToken = ""
+	c.fallbackQuery = [32]byte{}
+	c.txMu.Unlock()
+	if token != "" && !match {
+		c.t.c.ServerTrace.Discard(token)
+		return ""
+	}
+	return token
 }
 
 func (c *connState) discardFallbackToken() {
@@ -131,9 +139,36 @@ func (c *connState) discardFallbackToken() {
 	c.txMu.Lock()
 	token := c.fallbackToken
 	c.fallbackToken = ""
+	c.fallbackQuery = [32]byte{}
 	c.txMu.Unlock()
 	if token != "" {
 		c.t.c.ServerTrace.Discard(token)
+	}
+}
+
+func (s *stmtState) serverScope(op *operation) {
+	s.serverMu.Lock()
+	token := s.serverToken
+	s.serverToken = ""
+	s.serverMu.Unlock()
+	if token != "" {
+		if op.enabled {
+			op.serverToken = token
+		} else {
+			s.t.c.ServerTrace.Discard(token)
+		}
+		return
+	}
+	s.conn.serverScope(op)
+}
+
+func (s *stmtState) discardServerToken() {
+	s.serverMu.Lock()
+	token := s.serverToken
+	s.serverToken = ""
+	s.serverMu.Unlock()
+	if token != "" && s.t.c.ServerTrace != nil {
+		s.t.c.ServerTrace.Discard(token)
 	}
 }
 
