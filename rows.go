@@ -15,6 +15,7 @@ import (
 
 type rowsBase interface{ driver.Rows }
 type rowsState struct {
+	onClose             func()
 	raw                 driver.Rows
 	span                trace.Span
 	start               time.Time
@@ -35,6 +36,9 @@ type rowCancellation struct {
 }
 
 func (t *telemetry) queryResult(op operation, r driver.Rows, err error, txContexts ...context.Context) (driver.Rows, error) {
+	return t.queryResultWithClose(op, r, err, nil, txContexts...)
+}
+func (t *telemetry) queryResultWithClose(op operation, r driver.Rows, err error, onClose func(), txContexts ...context.Context) (driver.Rows, error) {
 	sc := t.finish(op, err, nil)
 	if err != nil {
 		return r, err
@@ -43,6 +47,9 @@ func (t *telemetry) queryResult(op operation, r driver.Rows, err error, txContex
 		return nil, nil
 	}
 	if !t.c.Client.Rows || !op.enabled || !sc.IsValid() {
+		if onClose != nil {
+			return wrapRows(&rowsState{raw: r, onClose: onClose}), nil
+		}
 		return r, nil
 	}
 	// Parentage retains only SpanContext. The stoppable cancellation subscription below
@@ -51,9 +58,12 @@ func (t *telemetry) queryResult(op operation, r driver.Rows, err error, txContex
 	_, span := t.tracer.Start(ctx, op.d.Summary+" consumption", trace.WithSpanKind(trace.SpanKindInternal), trace.WithAttributes(attribute.String("firebird.source", "client"), attribute.String("firebird.correlation", "exact"), attribute.String("firebird.duration.kind", "consumption_lifetime")))
 	if !span.IsRecording() {
 		span.End()
+		if onClose != nil {
+			return wrapRows(&rowsState{raw: r, onClose: onClose}), nil
+		}
 		return r, nil
 	}
-	state := &rowsState{raw: r, span: span, start: time.Now()}
+	state := &rowsState{raw: r, span: span, start: time.Now(), onClose: onClose}
 	sources := [2]context.Context{op.ctx, nil}
 	if len(txContexts) > 0 {
 		sources[1] = txContexts[0]
@@ -96,6 +106,9 @@ func (r *rowsState) Next(dest []driver.Value) error {
 }
 func (r *rowsState) Close() error {
 	r.closeOnce.Do(func() {
+		if r.onClose != nil {
+			defer r.onClose()
+		}
 		r.closeErr = r.raw.Close()
 		// database/sql may supply a deferred error only from Close after Next returned EOF.
 		// Keep the original Close result for the caller; choose the observed telemetry outcome separately.
@@ -140,6 +153,9 @@ func (r *rowsState) Close() error {
 	return r.closeErr
 }
 func (r *rowsState) finish(reason string, err error) {
+	if r.span == nil {
+		return
+	}
 	r.once.Do(func() {
 		r.mu.Lock()
 		defer r.mu.Unlock()

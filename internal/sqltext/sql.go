@@ -33,6 +33,46 @@ func AnalyzeUnknownDialect(sql string, inputLimit, outputLimit int) Description 
 	return analyze(sql, inputLimit, outputLimit, false)
 }
 
+// LeadingOperation classifies only the statement operation. It does not expose
+// identifiers and is therefore safe when the originating client's dialect is unknown.
+func LeadingOperation(sql string) string {
+	if len(sql) > MaxInput || !utf8.ValidString(sql) {
+		return ""
+	}
+	ts, ok := lex(sql)
+	if !ok || len(ts) == 0 {
+		return ""
+	}
+	start := 0
+	if ts[0].text == "WITH" {
+		depth := 0
+		start = -1
+		for i, t := range ts {
+			if t.text == "(" {
+				depth++
+			}
+			if t.text == ")" {
+				depth--
+			}
+			if i > 0 && depth == 0 && isOperation(t.text) {
+				start = i
+				break
+			}
+		}
+		if start < 0 {
+			return ""
+		}
+	}
+	op := ts[start].text
+	if !isOperation(op) {
+		return ""
+	}
+	if op == "EXECUTE" && start+1 < len(ts) && (ts[start+1].text == "PROCEDURE" || ts[start+1].text == "BLOCK") {
+		op += " " + ts[start+1].text
+	}
+	return op
+}
+
 func analyze(sql string, inputLimit, outputLimit int, quotedIdentifiers bool) Description {
 	d := Description{Operation: "SQL", Summary: "SQL"}
 	if inputLimit <= 0 || inputLimit > MaxInput {
@@ -148,7 +188,7 @@ func analyze(sql string, inputLimit, outputLimit int, quotedIdentifiers bool) De
 }
 func isOperation(s string) bool {
 	switch s {
-	case "SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "EXECUTE", "CREATE", "ALTER", "DROP", "RECREATE", "GRANT", "REVOKE", "COMMENT", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE", "SET":
+	case "SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "EXECUTE", "CREATE", "ALTER", "DROP", "RECREATE", "DECLARE", "GRANT", "REVOKE", "COMMENT", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE", "SET":
 		return true
 	}
 	return false
@@ -361,4 +401,18 @@ func lex(s string) ([]token, bool) {
 		return nil, false
 	}
 	return out, len(delimiters) == 0
+}
+
+// HasTerminalEllipsis recognizes a terminal Trace marker outside removed comments.
+// An unterminated literal/comment is already incomplete; dots inside complete SQL
+// literals or comments are not truncation markers.
+func HasTerminalEllipsis(s string) bool {
+	if !strings.HasSuffix(strings.TrimSpace(s), "...") {
+		return false
+	}
+	if len(s) > MaxInput || !utf8.ValidString(s) {
+		return true
+	}
+	ts, ok := lex(s)
+	return !ok || len(ts) > 0 && ts[len(ts)-1].text == "."
 }

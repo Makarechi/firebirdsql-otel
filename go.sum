@@ -20,8 +20,8 @@ github.com/kardianos/osext v0.0.0-20190222173326-2bc1f35cddc0/go.mod h1:1NbS8ALr
 github.com/kisielk/sqlstruct v0.0.0-20201105191214-5f3e10d3ab46/go.mod h1:yyMNCyc/Ib3bDTKd379tNMpB/7/H5TjM2Y9QJ5THLbE=
 github.com/nakagami/chacha20 v0.1.0 h1:2fbf5KeVUw7oRpAe6/A7DqvBJLYYu0ka5WstFbnkEVo=
 github.com/nakagami/chacha20 v0.1.0/go.mod h1:xpoujepNFA7MvYLvX5xKHzlOHimDrLI9Ll8zfOJ0l2E=
-github.com/nakagami/firebirdsql v0.9.20 h1:I7kbSFOSzL0RI2z0XIfbamUkq6PZ1dN6eWlTbTseUSs=
-github.com/nakagami/firebirdsql v0.9.20/go.mod h1:HsxjwNJ2Xr4MIppGCJheXkvaOFcvsj3UIYaveiQb6rQ=
+github.com/nakagami/firebirdsql v0.9.21 h1:EFpjvBsJXEpS44sT0w8QlyGKbEut6w+EqRhLE5VOkAs=
+github.com/nakagami/firebirdsql v0.9.21/go.mod h1:HsxjwNJ2Xr4MIppGCJheXkvaOFcvsj3UIYaveiQb6rQ=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=

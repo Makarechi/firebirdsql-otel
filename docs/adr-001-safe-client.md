@@ -12,7 +12,7 @@ Semantic keys are pinned to the database convention vocabulary shipped with Open
 
 All readers and collectors are opt-in and independent of business queries. Metadata describes possible dependencies, MON$ describes scoped snapshots, Trace describes observed server events, and Profiler is a manually pinned diagnostic example. None is an inferred complete execution tree.
 
-Client SQL descriptions follow **client dialect 3**, which nakagami/firebirdsql v0.9.20
+Client SQL descriptions follow **client dialect 3**, which nakagami/firebirdsql v0.9.21
 sets explicitly during statement preparation. A database's stored dialect does not
 change that client setting. Custom drivers/connectors passed to the safe API must use
 client dialect 3 as well; this API does not negotiate or add dialect 1 support.

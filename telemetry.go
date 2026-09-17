@@ -24,13 +24,14 @@ type telemetry struct {
 	spanAttrs, metricAttrs []attribute.KeyValue
 }
 type operation struct {
-	ctx      context.Context
-	start    time.Time
-	method   string
-	d        description
-	enabled  bool
-	fallback bool
-	t        *telemetry
+	serverToken string
+	ctx         context.Context
+	start       time.Time
+	method      string
+	d           description
+	enabled     bool
+	fallback    bool
+	t           *telemetry
 }
 
 func newTelemetry(c Config) (*telemetry, error) {
@@ -92,6 +93,9 @@ func (t *telemetry) start(ctx context.Context, method string, d description) ope
 }
 func (t *telemetry) finish(op operation, err error, extra []attribute.KeyValue) trace.SpanContext {
 	if op.fallback && err == driver.ErrSkip {
+		if op.serverToken != "" {
+			t.c.ServerTrace.Discard(op.serverToken)
+		}
 		return trace.SpanContext{}
 	}
 	end := time.Now()
@@ -126,6 +130,15 @@ func (t *telemetry) finish(op operation, err error, extra []attribute.KeyValue) 
 		span.SetStatus(codes.Error, kind)
 	}
 	sc := span.SpanContext()
+	if op.serverToken != "" {
+		if err != nil {
+			t.c.ServerTrace.Discard(op.serverToken)
+		} else if span.IsRecording() {
+			t.c.ServerTrace.Bind(op.serverToken, sc)
+		} else {
+			t.c.ServerTrace.Discard(op.serverToken)
+		}
+	}
 	span.End(trace.WithTimestamp(end))
 	return sc
 }

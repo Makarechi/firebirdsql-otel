@@ -46,7 +46,15 @@ type ClientDiagnosticsConfig struct {
 	Filter func(context.Context, Operation) bool
 }
 type Operation struct{ Method, Name, Summary, Procedure string }
+type ServerTrace interface {
+	Register(trace.SpanContext) string
+	Bind(string, trace.SpanContext)
+	Discard(string)
+}
 type Config struct {
+	// ServerTrace optionally associates sampled operations with a separately started
+	// server collector. It adds a reserved session marker query before execution.
+	ServerTrace    ServerTrace
 	Profile        Profile
 	SQL            SQLPolicy
 	Connection     ConnectionAttributes
@@ -74,6 +82,9 @@ func normalizeConfig(c Config) (Config, error) {
 	}
 	if c.Profile != Compatibility && c.Profile != SafeClient && c.Profile != Diagnostic {
 		return c, errors.New("firebirdotel: invalid profile")
+	}
+	if c.Profile == Compatibility && c.ServerTrace != nil {
+		return c, errors.New("firebirdotel: server tracing requires a safe client profile")
 	}
 	if c.Profile != Compatibility && len(c.OTelOptions) > 0 {
 		return c, errors.New("firebirdotel: OTelOptions are only supported in compatibility mode; use explicit Config fields")
