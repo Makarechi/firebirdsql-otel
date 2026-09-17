@@ -62,7 +62,7 @@ var attachment = regexp.MustCompile(`^\t[^\r\n]+ \(ATT_([0-9]+), [^\r\n]*\)[ \t]
 var transaction = regexp.MustCompile(`^\t[ \t]*\(TRA_([0-9]+), [^\r\n]*\)[ \t]*$`)
 var scopeMarker = regexp.MustCompile(`^SELECT 1 FROM RDB\$DATABASE /\*firebirdotel_scope:([0-9a-f]{32})\*/$`)
 var statement = regexp.MustCompile(`^Statement ([0-9]+):$`)
-var parameter = regexp.MustCompile(`^param[0-9]+ = [^,\r\n]+, "`)
+var parameterPrefix = regexp.MustCompile(`^param[0-9]+ = `)
 var fetched = regexp.MustCompile(`^[0-9]+ records fetched$`)
 var affected = regexp.MustCompile(`^[0-9]+ records affected$`)
 var performanceLine = regexp.MustCompile(`^[0-9]+ ms(?:, [0-9]+ (?:read\(s\)|write\(s\)|fetch\(es\)|mark\(s\)))*$`)
@@ -163,7 +163,7 @@ func (p *Parser) consume(line string) []Event {
 		complete := sqltext.LexicallyComplete(p.sql.String())
 		mayEnd := complete && sqltext.StatementMayEnd(p.sql.String())
 		performanceBoundary := mayEnd && performanceLine.MatchString(trim) && terminalPerformanceOperation(p.sql.String())
-		metadataBoundary := mayEnd && (p.sqlSeparated && (parameter.MatchString(line) || trim == "returns:") || fetched.MatchString(trim) || affected.MatchString(trim))
+		metadataBoundary := mayEnd && (p.sqlSeparated && (parameterMetadata(line) || trim == "returns:") || fetched.MatchString(trim) || affected.MatchString(trim))
 		boundary := header.MatchString(line) || strings.HasPrefix(trim, "^^^") || metadataBoundary || performanceBoundary
 		if !boundary || !sqltext.LexicallyComplete(p.sql.String()) {
 			p.recordBytes += len(line) + 1
@@ -330,7 +330,7 @@ func (p *Parser) consume(line string) []Event {
 		}
 		return nil
 	}
-	if parameter.MatchString(line) || trim == "returns:" || fetched.MatchString(trim) || affected.MatchString(trim) {
+	if parameterMetadata(line) || trim == "returns:" || fetched.MatchString(trim) || affected.MatchString(trim) {
 		p.collectSQL = false
 		return nil
 	}
@@ -449,13 +449,54 @@ func (p *Parser) finish() *Event {
 }
 
 func terminalPerformanceOperation(raw string) bool {
-	d := sqltext.AnalyzeUnknownDialect(raw, 0, 0)
-	switch d.Operation {
+	switch sqltext.LeadingOperation(raw) {
 	case "CREATE", "ALTER", "DROP", "RECREATE", "GRANT", "REVOKE", "COMMENT", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE", "SET", "EXECUTE BLOCK", "EXECUTE PROCEDURE":
-		return d.Valid
+		return true
 	default:
 		return false
 	}
+}
+
+func parameterMetadata(line string) bool {
+	loc := parameterPrefix.FindStringIndex(line)
+	if loc == nil || loc[0] != 0 {
+		return false
+	}
+	rest := line[loc[1]:]
+	depth := 0
+	separator := -1
+	for i, r := range rest {
+		switch r {
+		case '(':
+			depth++
+		case ')':
+			if depth == 0 {
+				return false
+			}
+			depth--
+		case ',':
+			if depth == 0 {
+				separator = i
+			}
+		}
+		if separator >= 0 {
+			break
+		}
+	}
+	typeName := strings.TrimSpace(rest[:max(separator, 0)])
+	value := ""
+	if separator >= 0 {
+		value = strings.TrimSpace(rest[separator+1:])
+	}
+	if separator < 0 || typeName == "" || len(typeName) > 128 || value == "" || depth != 0 {
+		return false
+	}
+	for _, r := range typeName {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && !unicode.IsSpace(r) && !strings.ContainsRune("_(),", r) {
+			return false
+		}
+	}
+	return true
 }
 
 func metadataName(s string) bool {

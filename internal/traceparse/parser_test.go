@@ -304,6 +304,16 @@ func TestTraceSectionsRemainDistinctFromSQL(t *testing.T) {
 		}
 	})
 
+	t.Run("unquoted and precision parameters", func(t *testing.T) {
+		p := New()
+		sql := "SELECT ? FROM RDB$DATABASE"
+		wire := record("EXECUTE_STATEMENT_START", "Statement 1:\n---\n"+sql+"\n\nparam0 = integer, 7\nparam1 = decimal(10, 2), NULL") + record("TRACE_FINI", "")
+		events := p.Feed(wire)
+		if len(events) != 1 || events[0].SQL != sql || events[0].Name != "SELECT RDB$DATABASE" || events[0].Incomplete {
+			t.Fatal("native parameter metadata contaminated SQL", events)
+		}
+	})
+
 	t.Run("procedure without output metadata", func(t *testing.T) {
 		p := New()
 		sql := "EXECUTE PROCEDURE OTEL_DYNAMIC"
@@ -312,6 +322,16 @@ func TestTraceSectionsRemainDistinctFromSQL(t *testing.T) {
 		events := p.Feed(wire)
 		if len(events) != 2 || events[1].SQL != sql || events[1].DurationMS != 11 || events[1].Reads != 3 || events[1].Writes != 5 || events[1].Incomplete {
 			t.Fatal("procedure performance contaminated SQL", events)
+		}
+	})
+
+	t.Run("delimited ddl performance", func(t *testing.T) {
+		p := New()
+		sql := `CREATE TABLE "Order Items" (ID INTEGER)`
+		wire := record("EXECUTE_STATEMENT_START", "Statement 1:\n---\n"+sql+"\n      12 ms, 4 write(s)") + record("TRACE_FINI", "")
+		events := p.Feed(wire)
+		if len(events) != 1 || events[0].DurationMS != 12 || events[0].Writes != 4 || events[0].SQL != "" || !events[0].Incomplete {
+			t.Fatal("delimited DDL counters were lost", events)
 		}
 	})
 }

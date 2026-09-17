@@ -40,6 +40,7 @@ type SpanRuntime struct {
 	collector        *Runtime
 	registrations    map[string]scope
 	done             chan struct{}
+	doneOnce         sync.Once
 	bound            chan struct{}
 	err              error
 	tracer           otrace.Tracer
@@ -128,7 +129,7 @@ func (s *SpanRuntime) Start(ctx context.Context, collector ...Config) error {
 		s.mu.Lock()
 		s.err = err
 		s.mu.Unlock()
-		close(s.done)
+		s.signalDone()
 		return err
 	}
 	go s.consume(r)
@@ -221,6 +222,7 @@ func (s *SpanRuntime) Shutdown(ctx context.Context) error {
 	s.stopping = true
 	s.mu.Unlock()
 	if !started {
+		s.signalDone()
 		return nil
 	}
 	var err error
@@ -235,6 +237,10 @@ func (s *SpanRuntime) Shutdown(ctx context.Context) error {
 	case <-ctx.Done():
 		return errors.Join(err, ctx.Err())
 	}
+}
+
+func (s *SpanRuntime) signalDone() {
+	s.doneOnce.Do(func() { close(s.done) })
 }
 
 // Wait reports collector termination without stopping it. Unexpected termination
@@ -264,7 +270,7 @@ type serverTree struct {
 }
 
 func (s *SpanRuntime) consume(r *Runtime) {
-	defer close(s.done)
+	defer s.signalDone()
 	pending := make(map[int64]struct {
 		token  string
 		anchor time.Time
@@ -278,6 +284,15 @@ func (s *SpanRuntime) consume(r *Runtime) {
 		delete(trees, tree)
 		s.Discard(tree.token)
 		s.dropped.Add(context.Background(), 1, metric.WithAttributes(attribute.String("reason", reason)))
+	}
+	invalidate := func(reason string) {
+		for tree := range trees {
+			drop(tree, reason)
+		}
+		for _, p := range pending {
+			s.Discard(p.token)
+		}
+		clear(pending)
 	}
 	flush := func() {
 		for tree := range trees {
@@ -327,13 +342,7 @@ func (s *SpanRuntime) consume(r *Runtime) {
 				return
 			}
 			if e.Kind == "gap" {
-				for tree := range trees {
-					drop(tree, "gap")
-				}
-				for _, p := range pending {
-					s.Discard(p.token)
-				}
-				clear(pending)
+				invalidate("gap")
 				continue
 			}
 			if e.ScopeToken != "" {
@@ -351,6 +360,9 @@ func (s *SpanRuntime) consume(r *Runtime) {
 				continue
 			}
 			if e.Sequence == 0 {
+				if e.Incomplete && (e.Kind == "statement" || e.Kind == "procedure" || e.Kind == "function" || e.Kind == "trigger") {
+					invalidate("unmatched")
+				}
 				continue
 			}
 			if e.Phase == "start" {

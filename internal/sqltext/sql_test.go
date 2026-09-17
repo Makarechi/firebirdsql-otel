@@ -57,6 +57,15 @@ func FuzzAnalyze(f *testing.F) {
 }
 
 func TestUnknownDialectOmitsAmbiguousDescription(t *testing.T) {
+	for _, tt := range []struct{ sql, operation string }{
+		{`CREATE TABLE "Order Items" (ID INTEGER)`, "CREATE"},
+		{`EXECUTE PROCEDURE "Quoted Procedure"`, "EXECUTE PROCEDURE"},
+		{"WITH X AS (SELECT 1 FROM T) SELECT * FROM X", "SELECT"},
+	} {
+		if got := LeadingOperation(tt.sql); got != tt.operation {
+			t.Fatalf("LeadingOperation(%q)=%q want %q", tt.sql, got, tt.operation)
+		}
+	}
 	for _, q := range []string{`select "SECRET_CANARY" from rdb$database`, `select * from "SECRET_CANARY"`, `execute procedure "SECRET_CANARY"(?)`, `PLAN ("SECRET_CANARY" NATURAL)`} {
 		d := AnalyzeUnknownDialect(q, 0, 0)
 		if d.Valid || d.Text != "" || d.Fingerprint != "" || d.Procedure != "" || d.Collection != "" || d.Summary != "SQL" {
