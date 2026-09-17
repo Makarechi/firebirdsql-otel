@@ -353,7 +353,7 @@ func (s *SpanRuntime) consume(r *Runtime) {
 				if e.Phase != "finish" {
 					continue
 				}
-				if e.Sequence == 0 || e.Incomplete || e.Correlation == "unmatched" {
+				if e.Sequence == 0 || e.Correlation == "unmatched" {
 					s.Discard(e.ScopeToken)
 					invalidate("unmatched_marker")
 					continue
