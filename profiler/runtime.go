@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/nakagami/firebirdsql"
+	"github.com/nakagami/firebirdsql"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -142,7 +142,24 @@ func (s *Session) Finish(client trace.SpanContext) error {
 		s.span.SetAttributes(attribute.Bool("firebird.profiler.cleaned", true))
 	}
 	if err := errors.Join(finishErr, readErr, deleteErr); err != nil {
-		slog.Error("Firebird profiler failed", slog.String("pool", s.runtime.name), slog.Int64("profile_id", s.id))
+		for _, stage := range []struct {
+			name string
+			err  error
+		}{{"finish", finishErr}, {"read", readErr}, {"cleanup", deleteErr}} {
+			if stage.err == nil {
+				continue
+			}
+			attrs := []any{slog.String("pool", s.runtime.name), slog.Int64("profile_id", s.id), slog.String("stage", stage.name)}
+			var fbErr *firebirdsql.FbError
+			if errors.As(stage.err, &fbErr) {
+				attrs = append(attrs, slog.String("sqlstate", fbErr.SQLState), slog.Any("gds_codes", fbErr.GDSCodes))
+			} else if errors.Is(stage.err, context.DeadlineExceeded) {
+				attrs = append(attrs, slog.String("reason", "timeout"))
+			} else {
+				attrs = append(attrs, slog.String("reason", "driver_or_context"))
+			}
+			slog.Error("Firebird profiler failed", attrs...)
+		}
 		return errors.New("profiler: collection or cleanup failed")
 	}
 	return nil
