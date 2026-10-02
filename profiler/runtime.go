@@ -76,6 +76,21 @@ func New(dsn, name string, options ...Option) (*Runtime, error) {
 
 func (r *Runtime) Close() error { return r.db.Close() }
 
+// CheckSupported rejects databases where the default Firebird profiler cannot
+// persist and delete its PLG$PROF_* rows. Call this before accepting traffic.
+func (r *Runtime) CheckSupported(ctx context.Context) error {
+	var readOnly, replicaMode int64
+	if err := r.db.QueryRowContext(ctx, "SELECT MON$READ_ONLY, MON$REPLICA_MODE FROM MON$DATABASE").Scan(&readOnly, &replicaMode); err != nil {
+		return fmt.Errorf("profiler: database mode check failed: %w", err)
+	}
+	if readOnly == 1 || replicaMode == 1 {
+		return ErrReadOnlyDatabase
+	}
+	return nil
+}
+
+var ErrReadOnlyDatabase = errors.New("profiler: database is read-only; profile storage is unavailable")
+
 type Session struct {
 	runtime *Runtime
 	conn    driver.Conn
