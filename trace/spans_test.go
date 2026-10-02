@@ -390,6 +390,45 @@ func TestServerSpanExportsAllPerformanceCountersAndMarkerTiming(t *testing.T) {
 	}
 }
 
+func TestServerStatementSpanExportsExecutionPlan(t *testing.T) {
+	for _, tc := range []struct {
+		name, startPlan, finishPlan, wantPlan string
+	}{
+		{name: "plan on start", startPlan: "PLAN ( T ORDER IDX_ID )", wantPlan: "PLAN ( T ORDER IDX_ID )"},
+		{name: "plan on finish", finishPlan: "PLAN SORT ( T INDEX ( IDX_CONTRACT ) )", wantPlan: "PLAN SORT ( T INDEX ( IDX_CONTRACT ) )"},
+		{name: "missing plan"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := tracetest.NewSpanRecorder()
+			tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+			defer tp.Shutdown(context.Background())
+			s, err := NewSpans(SpanConfig{TracerProvider: tp})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, parent := tp.Tracer("application").Start(context.Background(), "client")
+			defer parent.End()
+			anchor := time.Date(2026, 10, 2, 8, 0, 0, 0, time.UTC)
+			start := Event{Kind: "statement", Name: "SELECT T", Plan: tc.startPlan, Sequence: 1, Timestamp: anchor.Add(time.Millisecond).Format("2006-01-02T15:04:05.999999999")}
+			finish := Event{Kind: "statement", Name: "SELECT T", Plan: tc.finishPlan, Sequence: 1, Timestamp: anchor.Add(2 * time.Millisecond).Format("2006-01-02T15:04:05.999999999")}
+			n := &serverNode{start: start, finish: finish, complete: true}
+			s.exportTree(&serverTree{scope: scope{parent: parent.SpanContext(), registered: anchor}, anchor: anchor, nodes: []*serverNode{n}})
+			spans := recorder.Ended()
+			if len(spans) != 1 {
+				t.Fatalf("got %d server spans, want 1", len(spans))
+			}
+			got, ok := attributeMap(spans[0].Attributes())["firebird.query.plan"]
+			if tc.wantPlan == "" {
+				if ok {
+					t.Fatalf("unexpected plan attribute: %s", got.AsString())
+				}
+			} else if !ok || got.AsString() != tc.wantPlan {
+				t.Fatalf("plan = %q, present = %t; want %q", got.AsString(), ok, tc.wantPlan)
+			}
+		})
+	}
+}
+
 func attributeMap(attrs []attribute.KeyValue) map[string]attribute.Value {
 	out := make(map[string]attribute.Value, len(attrs))
 	for _, a := range attrs {

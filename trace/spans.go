@@ -499,6 +499,15 @@ func (s *SpanRuntime) exportTree(tree *serverTree) {
 		if n.finish.SQL != "" {
 			attrs = append(attrs, attribute.String("db.query.text", n.finish.SQL))
 		}
+		if n.start.Kind == "statement" {
+			plan := n.start.Plan
+			if plan == "" {
+				plan = n.finish.Plan
+			}
+			if plan != "" {
+				attrs = append(attrs, attribute.String("firebird.query.plan", plan))
+			}
+		}
 		name := n.start.Name
 		if name == "" {
 			name = n.start.Kind

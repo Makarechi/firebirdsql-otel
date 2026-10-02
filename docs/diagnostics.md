@@ -149,6 +149,9 @@ The marker selects the client parent without matching names or timing windows.
 Text Trace nesting remains `firebird.correlation=heuristic`; it is not a guarantee
 of complete PSQL coverage. This does not produce a span for every SQL instruction
 inside PSQL. Table counters become span events, not invented timed table spans.
+When Firebird reports a sanitized classic execution plan for a statement, the
+server SQL span includes it as `firebird.query.plan`. Unsupported or ambiguous
+plan text is omitted rather than exported raw.
 Server time is aligned to the local marker time and marked
 `firebird.clock.alignment=marker_estimate`; native timestamp differences determine
 duration, without assuming the server's timezone or clock synchronization.
