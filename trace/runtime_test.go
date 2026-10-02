@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/Makarechi/firebirdsql-otel/internal/traceparse"
+	"github.com/nakagami/firebirdsql"
 )
 
 type fakeTraceManager struct {
@@ -113,9 +115,51 @@ func (s *fakeTraceSession) CloseContext(ctx context.Context) error {
 func useFakeManager(t *testing.T, manager *fakeTraceManager) {
 	t.Helper()
 	previous := newTraceManager
-	newTraceManager = func(string, string, string) (traceManager, error) { return manager, nil }
+	newTraceManager = func(string, string, string, firebirdsql.ServiceManagerOptions) (traceManager, error) {
+		return manager, nil
+	}
 	t.Cleanup(func() { newTraceManager = previous })
 }
+
+func TestRuntimeServicesOptions(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		plugin     string
+		wireCrypt  *bool
+		wantPlugin string
+		wantCrypt  bool
+	}{
+		{name: "default", wantPlugin: "Srp256", wantCrypt: true},
+		{name: "legacy plaintext", plugin: "Legacy_Auth", wireCrypt: boolPtr(false), wantPlugin: "Legacy_Auth"},
+		{name: "explicit encryption", plugin: "Srp", wireCrypt: boolPtr(true), wantPlugin: "Srp", wantCrypt: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			previous := newTraceManager
+			manager := &fakeTraceManager{session: newFakeTraceSession()}
+			var got firebirdsql.ServiceManagerOptions
+			newTraceManager = func(_, _, _ string, options firebirdsql.ServiceManagerOptions) (traceManager, error) {
+				got = options
+				return manager, nil
+			}
+			t.Cleanup(func() { newTraceManager = previous })
+			r, err := Start(t.Context(), Config{
+				Address: "localhost", User: "test", Database: "/db", Name: "test",
+				AuthPlugin: tc.plugin, WireCrypt: tc.wireCrypt,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.AuthPlugin != tc.wantPlugin || got.WireCrypt != tc.wantCrypt {
+				t.Fatalf("Services options = %+v, want plugin %q and encryption %t", got, tc.wantPlugin, tc.wantCrypt)
+			}
+			if err := r.Shutdown(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func boolPtr(value bool) *bool { return &value }
 
 func runtimeTraceRecord(kind, body string) string {
 	return "2026-09-17T08:00:00.0000 (1:0x1) " + kind + " \n\t/db (ATT_1, test, UTF8)\n\t(TRA_1, READ_WRITE)\n\n" + body + "\n\n"
@@ -304,6 +348,8 @@ func TestRuntimeConfigurationValidation(t *testing.T) {
 		{Address: "localhost", User: string([]byte{0xff}), Database: "/db", Name: "test"},
 		{Address: "localhost", User: "test", Password: string([]byte{0xff}), Database: "/db", Name: "test"},
 		{Address: "localhost", User: "test", Database: "/db", Name: string([]byte{0xff})},
+		{Address: "localhost", User: "test", Database: "/db", Name: "test", AuthPlugin: "Unknown"},
+		{Address: "localhost", User: "test", Database: "/db", Name: "test", AuthPlugin: "Legacy_Auth\nSECRET"},
 	} {
 		if r, err := Start(t.Context(), cfg); err == nil || r != nil {
 			t.Fatal("accepted invalid collector config")
@@ -328,9 +374,21 @@ func TestFirebird5Trace(t *testing.T) {
 		t.Fatal(err)
 	}
 	password, _ := u.User.Password()
+	config := Config{
+		Address: u.Host, User: u.User.Username(), Password: password,
+		Database: u.Path, Name: "firebirdotel-live-test",
+		AuthPlugin: u.Query().Get("auth_plugin_name"),
+	}
+	if value := u.Query().Get("wire_crypt"); value != "" {
+		enabled, err := strconv.ParseBool(value)
+		if err != nil {
+			t.Fatal("invalid wire_crypt test setting")
+		}
+		config.WireCrypt = &enabled
+	}
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
-	r, err := Start(ctx, Config{Address: u.Host, User: u.User.Username(), Password: password, Database: u.Path, Name: "firebirdotel-live-test"})
+	r, err := Start(ctx, config)
 	if err != nil {
 		t.Fatal(err)
 	}

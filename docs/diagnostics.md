@@ -97,6 +97,23 @@ if err != nil { return err }
 // Pass driverName to your existing database constructor. It still owns the pool.
 ```
 
+The Trace collector makes its own Services API connection. For a Firebird server
+whose SQL DSN uses `auth_plugin_name=Legacy_Auth&wire_crypt=false`, pass matching
+settings when starting the collector:
+
+```go
+wireCrypt := false
+err = server.Start(startupContext, fbtrace.Config{
+    Address: hostPort, User: diagnosticUser, Password: password,
+    Database: databasePath, Name: "billing-primary-diagnostics",
+    AuthPlugin: "Legacy_Auth", WireCrypt: &wireCrypt,
+})
+```
+
+These settings apply to the collector connection only. When omitted, the driver
+continues to use `Srp256` and wire encryption. The supported authentication
+plugins are `Srp256`, `Srp` and `Legacy_Auth`.
+
 `NewSpans` may run before connection configuration is loaded; pass the collector
 configuration to `Start` later, before serving database traffic. `Start` waits for
 readiness, and its context only bounds startup. On shutdown, stop database traffic,

@@ -23,6 +23,12 @@ const shutdownDrainGrace = 250 * time.Millisecond
 
 type Config struct {
 	Address, User, Password, Database string
+	// AuthPlugin selects the Services API authentication plugin. Empty uses
+	// the driver's default (Srp256). Supported values are Srp256, Srp and Legacy_Auth.
+	AuthPlugin string
+	// WireCrypt controls Services API wire encryption. Nil keeps the driver's
+	// default (enabled); set a pointer to false only for servers that require it.
+	WireCrypt *bool
 	// Name is an operator-chosen, non-sensitive session name, useful for diagnostics.
 	Name   string
 	Buffer int
@@ -43,8 +49,8 @@ func (m driverTraceManager) StartWithNameContext(ctx context.Context, name, conf
 	return m.TraceManager.StartWithNameContext(ctx, name, config)
 }
 
-var newTraceManager = func(address, user, password string) (traceManager, error) {
-	m, err := firebirdsql.NewTraceManager(address, user, password, firebirdsql.GetDefaultServiceManagerOptions())
+var newTraceManager = func(address, user, password string, options firebirdsql.ServiceManagerOptions) (traceManager, error) {
+	m, err := firebirdsql.NewTraceManager(address, user, password, options)
 	if err != nil {
 		return nil, err
 	}
@@ -84,6 +90,9 @@ func Start(ctx context.Context, c Config) (*Runtime, error) {
 	if strings.ContainsAny(c.Name, "\r\n") {
 		return nil, errors.New("trace: invalid session name")
 	}
+	if c.AuthPlugin != "" && c.AuthPlugin != "Srp256" && c.AuthPlugin != "Srp" && c.AuthPlugin != "Legacy_Auth" {
+		return nil, errors.New("trace: invalid auth plugin")
+	}
 	filter, err := databaseFilter(c.Database)
 	if err != nil {
 		return nil, err
@@ -94,7 +103,14 @@ func Start(ctx context.Context, c Config) (*Runtime, error) {
 	if c.Buffer < 1 || c.Buffer > 256 {
 		return nil, errors.New("trace: invalid queue bound")
 	}
-	manager, err := newTraceManager(c.Address, c.User, c.Password)
+	options := firebirdsql.GetDefaultServiceManagerOptions()
+	if c.AuthPlugin != "" {
+		options.AuthPlugin = c.AuthPlugin
+	}
+	if c.WireCrypt != nil {
+		options.WireCrypt = *c.WireCrypt
+	}
+	manager, err := newTraceManager(c.Address, c.User, c.Password, options)
 	if err != nil {
 		return nil, errors.New("trace: manager creation failed")
 	}
