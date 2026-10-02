@@ -554,8 +554,8 @@ func planParts(plan string) []string {
 			end--
 		}
 		if end < len(plan) {
-			if newline := strings.LastIndexByte(plan[:end], '\n'); newline >= 160 {
-				end = newline + 1
+			if before, _, found := strings.CutLast(plan[:end], "\n"); found && len(before) >= 160 {
+				end = len(before) + 1
 			}
 		}
 		parts = append(parts, plan[:end])
