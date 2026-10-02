@@ -41,6 +41,7 @@ func (m *fakeTraceManager) StartWithNameContext(ctx context.Context, name, confi
 
 type fakeTraceSession struct {
 	chunks       chan string
+	rawChunks    bool
 	closed       chan struct{}
 	waitErr      error
 	closeErr     error
@@ -56,7 +57,7 @@ type drainingTraceSession struct {
 	once   sync.Once
 }
 
-func (s *drainingTraceSession) WaitStringsContext(ctx context.Context, result chan string) error {
+func (s *drainingTraceSession) WaitChunksContext(ctx context.Context, result chan string) error {
 	select {
 	case <-s.closed:
 	case <-ctx.Done():
@@ -64,7 +65,7 @@ func (s *drainingTraceSession) WaitStringsContext(ctx context.Context, result ch
 	}
 	for _, line := range s.lines {
 		select {
-		case result <- line:
+		case result <- line + "\n":
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -81,10 +82,13 @@ func newFakeTraceSession() *fakeTraceSession {
 	return &fakeTraceSession{chunks: make(chan string, 8), closed: make(chan struct{})}
 }
 
-func (s *fakeTraceSession) WaitStringsContext(ctx context.Context, result chan string) error {
+func (s *fakeTraceSession) WaitChunksContext(ctx context.Context, result chan string) error {
 	for {
 		select {
 		case chunk := <-s.chunks:
+			if !s.rawChunks {
+				chunk += "\n"
+			}
 			select {
 			case result <- chunk:
 			case <-ctx.Done():
@@ -163,6 +167,43 @@ func boolPtr(value bool) *bool { return &value }
 
 func runtimeTraceRecord(kind, body string) string {
 	return "2026-09-17T08:00:00.0000 (1:0x1) " + kind + " \n\t/db (ATT_1, test, UTF8)\n\t(TRA_1, READ_WRITE)\n\n" + body + "\n\n"
+}
+
+func TestRuntimeParsesBufferedChunksAcrossRecordBoundaries(t *testing.T) {
+	session := newFakeTraceSession()
+	session.rawChunks = true
+	useFakeManager(t, &fakeTraceManager{session: session})
+	r, err := Start(t.Context(), Config{Address: "localhost", User: "test", Database: "/db", Name: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-r.Events() // readiness
+	token := strings.Repeat("a", 32)
+	marker := "SELECT 1 FROM RDB$DATABASE /*firebirdotel_scope:" + token + "*/"
+	wire := runtimeTraceRecord("EXECUTE_STATEMENT_START", "Statement 1:\n---\n"+marker) +
+		runtimeTraceRecord("EXECUTE_STATEMENT_FINISH", "Statement 1:\n---\n"+marker+"\n1 records fetched\n0 ms") +
+		runtimeTraceRecord("TRACE_FINI", "")
+	go func() {
+		for len(wire) > 0 {
+			n := min(7, len(wire))
+			session.chunks <- wire[:n]
+			wire = wire[n:]
+		}
+	}()
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	found := false
+	for !found {
+		select {
+		case e := <-r.Events():
+			found = e.ScopeToken == token && e.Phase == "finish" && e.Sequence != 0
+		case <-ctx.Done():
+			t.Fatal("buffered stream did not yield a matched marker")
+		}
+	}
+	if err := r.Shutdown(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestRuntimeStartsAndShutsDownInProcess(t *testing.T) {

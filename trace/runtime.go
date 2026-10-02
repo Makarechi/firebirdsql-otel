@@ -35,7 +35,7 @@ type Config struct {
 }
 
 type traceSession interface {
-	WaitStringsContext(context.Context, chan string) error
+	WaitChunksContext(context.Context, chan string) error
 	CloseContext(context.Context) error
 }
 
@@ -43,18 +43,8 @@ type traceManager interface {
 	StartWithNameContext(context.Context, string, string) (traceSession, error)
 }
 
-type driverTraceManager struct{ *firebirdsql.TraceManager }
-
-func (m driverTraceManager) StartWithNameContext(ctx context.Context, name, config string) (traceSession, error) {
-	return m.TraceManager.StartWithNameContext(ctx, name, config)
-}
-
 var newTraceManager = func(address, user, password string, options firebirdsql.ServiceManagerOptions) (traceManager, error) {
-	m, err := firebirdsql.NewTraceManager(address, user, password, options)
-	if err != nil {
-		return nil, err
-	}
-	return driverTraceManager{m}, nil
+	return bufferedTraceManager{address: address, user: user, password: password, options: options}, nil
 }
 
 type Runtime struct {
@@ -165,7 +155,7 @@ func (r *Runtime) run(ctx context.Context) {
 	raw := make(chan string)
 	finished := make(chan error, 1)
 	go func() {
-		finished <- r.session.WaitStringsContext(ctx, raw)
+		finished <- r.session.WaitChunksContext(ctx, raw)
 		close(raw)
 	}()
 
@@ -246,9 +236,7 @@ func (r *Runtime) run(ctx context.Context) {
 				emit(parser.Flush())
 				return
 			}
-			// WaitStringsContext uses Firebird's isc_info_svc_line API and returns
-			// one line without its delimiter. Restore that documented delimiter.
-			if !emit(parser.Feed(chunk + "\n")) {
+			if !emit(parser.Feed(chunk)) {
 				r.finish(nil)
 				return
 			}
