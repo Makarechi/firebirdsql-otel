@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -204,6 +205,85 @@ func TestUnmatchedExecutionDiscardsActiveTree(t *testing.T) {
 	<-s.done
 }
 
+func TestUnmatchedOtherAttachmentPreservesActiveTree(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	defer tp.Shutdown(context.Background())
+	s, err := NewSpans(SpanConfig{TracerProvider: tp})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.running = true
+	_, parent := tp.Tracer("application").Start(context.Background(), "client")
+	defer parent.End()
+	token := s.Register(parent.SpanContext())
+	s.Bind(token, parent.SpanContext())
+	r := &Runtime{events: make(chan Event), done: make(chan struct{})}
+	go s.consume(r)
+	base := Event{Source: "trace", Correlation: "heuristic", Timestamp: "2026-09-17T08:00:00.0000", AttachmentID: 1, TransactionID: 2}
+	marker := base
+	marker.Kind, marker.Phase, marker.ScopeToken, marker.Sequence = "statement", "finish", token, 99
+	r.events <- marker
+	root := base
+	root.Kind, root.Phase, root.Name, root.Sequence = "statement", "start", "SELECT T", 1
+	r.events <- root
+	r.events <- Event{Kind: "procedure", Phase: "finish", Incomplete: true, Correlation: "unmatched", AttachmentID: 7, TransactionID: 8}
+	r.events <- Event{Kind: "statement", Phase: "finish", ScopeToken: strings.Repeat("0", 32), Incomplete: true, Correlation: "unmatched", AttachmentID: 7, TransactionID: 8}
+	root.Phase, root.Timestamp = "finish", "2026-09-17T08:00:00.0010"
+	r.events <- root
+	close(r.done)
+	close(r.events)
+	<-s.done
+	spans := recorder.Ended()
+	if len(spans) != 1 || spans[0].Name() != "SELECT T" || spans[0].Parent().SpanID() != parent.SpanContext().SpanID() {
+		t.Fatal("unrelated attachment discarded the active tree", spans)
+	}
+}
+
+func TestLargeServerTreeKeepsRootSpan(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	defer tp.Shutdown(context.Background())
+	s, err := NewSpans(SpanConfig{TracerProvider: tp})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.running = true
+	_, parent := tp.Tracer("application").Start(context.Background(), "client")
+	defer parent.End()
+	token := s.Register(parent.SpanContext())
+	s.Bind(token, parent.SpanContext())
+	r := &Runtime{events: make(chan Event), done: make(chan struct{})}
+	go s.consume(r)
+	base := Event{Source: "trace", Correlation: "heuristic", Timestamp: "2026-09-17T08:00:00.0000", AttachmentID: 1, TransactionID: 2}
+	marker := base
+	marker.Kind, marker.Phase, marker.ScopeToken, marker.Sequence = "statement", "finish", token, 99
+	r.events <- marker
+	root := base
+	root.Kind, root.Phase, root.Name, root.Sequence = "statement", "start", "SELECT VIEW", 1
+	r.events <- root
+	for i := uint64(2); i <= 202; i++ {
+		child := base
+		child.Kind, child.Phase, child.Name, child.Sequence, child.ParentSequence = "procedure", "start", "LOOKUP", i, 1
+		r.events <- child
+		child.Phase = "finish"
+		r.events <- child
+	}
+	root.Phase, root.Timestamp = "finish", "2026-09-17T08:00:00.0100"
+	r.events <- root
+	close(r.done)
+	close(r.events)
+	<-s.done
+	spans := recorder.Ended()
+	if len(spans) != 128 {
+		t.Fatalf("got %d spans, want bounded root plus children", len(spans))
+	}
+	rootSpan := spans[0]
+	if rootSpan.Name() != "SELECT VIEW" || rootSpan.Parent().SpanID() != parent.SpanContext().SpanID() || !attributeMap(rootSpan.Attributes())["firebird.incomplete"].AsBool() {
+		t.Fatal("large query lost its incomplete parent span", rootSpan)
+	}
+}
+
 func TestUnmatchedMarkerCannotCreateServerTree(t *testing.T) {
 	s, err := NewSpans(SpanConfig{})
 	if err != nil {
@@ -308,6 +388,67 @@ func TestServerSpanExportsAllPerformanceCountersAndMarkerTiming(t *testing.T) {
 		if got := tableAttrs[key].AsInt64(); got != want {
 			t.Fatalf("%s=%d want %d", key, got, want)
 		}
+	}
+}
+
+func TestServerStatementSpanExportsExecutionPlan(t *testing.T) {
+	for _, tc := range []struct {
+		name, startPlan, finishPlan, wantPlan string
+	}{
+		{name: "plan on start", startPlan: "PLAN ( T ORDER IDX_ID )", wantPlan: "PLAN ( T ORDER IDX_ID )"},
+		{name: "plan on finish", finishPlan: "PLAN SORT ( T INDEX ( IDX_CONTRACT ) )", wantPlan: "PLAN SORT ( T INDEX ( IDX_CONTRACT ) )"},
+		{name: "explained plan", startPlan: "Select Expression\n    -> Filter", wantPlan: "Select Expression\n    -> Filter"},
+		{name: "missing plan"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := tracetest.NewSpanRecorder()
+			tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+			defer tp.Shutdown(context.Background())
+			s, err := NewSpans(SpanConfig{TracerProvider: tp})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, parent := tp.Tracer("application").Start(context.Background(), "client")
+			defer parent.End()
+			anchor := time.Date(2026, 10, 2, 8, 0, 0, 0, time.UTC)
+			start := Event{Kind: "statement", Name: "SELECT T", Plan: tc.startPlan, Sequence: 1, Timestamp: anchor.Add(time.Millisecond).Format("2006-01-02T15:04:05.999999999")}
+			finish := Event{Kind: "statement", Name: "SELECT T", Plan: tc.finishPlan, Sequence: 1, Timestamp: anchor.Add(2 * time.Millisecond).Format("2006-01-02T15:04:05.999999999")}
+			n := &serverNode{start: start, finish: finish, complete: true}
+			s.exportTree(&serverTree{scope: scope{parent: parent.SpanContext(), registered: anchor}, anchor: anchor, nodes: []*serverNode{n}})
+			spans := recorder.Ended()
+			if len(spans) != 1 {
+				t.Fatalf("got %d server spans, want 1", len(spans))
+			}
+			got, ok := attributeMap(spans[0].Attributes())["firebird.query.plan"]
+			if tc.wantPlan == "" {
+				if ok {
+					t.Fatalf("unexpected plan attribute: %s", got.AsString())
+				}
+			} else if !ok || got.AsString() != tc.wantPlan {
+				t.Fatalf("plan = %q, present = %t; want %q", got.AsString(), ok, tc.wantPlan)
+			}
+		})
+	}
+}
+
+func TestPlanPartsFitCloudTraceAndPreserveTree(t *testing.T) {
+	plan := "Select Expression\n" + strings.Repeat("    -> Table \"Договор\" Access By ID\n        -> Index \"FK_CONTRACT_DETAIL\" Range Scan (full match)\n", 20)
+	parts := planParts(plan)
+	if len(parts) < 2 || strings.Join(parts, "") != plan {
+		t.Fatalf("plan not preserved across parts: %d parts", len(parts))
+	}
+	for i, part := range parts {
+		if len(part) > 255 || !utf8.ValidString(part) {
+			t.Fatalf("part %d exceeds Cloud Trace limit or splits UTF-8: %q", i, part)
+		}
+	}
+}
+
+func TestPlanPartsPreferCompleteSteps(t *testing.T) {
+	plan := "Select Expression\n    -> First N Records\n        -> Filter\n            -> Table \"OBJ$CONTRACT_PERSONAL_DETAIL\" Access By ID\n                -> Index \"PK_OBJ$CONTRACT_PERSONAL_DETAIL\" Full Scan\n                    -> Bitmap\n                        -> Index \"FK_OBJ$CONTRACT_PERS_DETAIL_1\" Range Scan (full match)"
+	parts := planParts(plan)
+	if len(parts) != 2 || !strings.HasSuffix(parts[0], "-> Bitmap\n") || !strings.HasPrefix(parts[1], "                        -> Index ") || strings.Join(parts, "") != plan {
+		t.Fatalf("record-source step split unnecessarily: %#v", parts)
 	}
 }
 

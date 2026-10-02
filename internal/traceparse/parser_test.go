@@ -149,6 +149,31 @@ func TestClassicPlanFamilies(t *testing.T) {
 	}
 }
 
+func TestExplainedPlanFromFirebirdFive(t *testing.T) {
+	plan := "Select Expression\n    -> First N Records\n        -> Filter\n            -> Table \"OBJ$CONTRACT_PERSONAL_DETAIL\" Access By ID\n                -> Index \"PK_OBJ$CONTRACT_PERSONAL_DETAIL\" Full Scan\n                    -> Bitmap\n                        -> Index \"FK_OBJ$CONTRACT_PERS_DETAIL_1\" Range Scan (full match)"
+	p := New()
+	wire := record("EXECUTE_STATEMENT_START", "Statement 1:\n---\nSELECT FIRST 1 ID FROM OBJ$CONTRACT_PERSONAL_DETAIL WHERE ID_CONTRACT = ? ORDER BY ID DESC\n^^^^^^^^\n"+plan+"\n\nparam0 = integer, \"12345678\"") + record("TRACE_FINI", "")
+	events := p.Feed(wire)
+	if len(events) != 1 || events[0].Plan != plan || events[0].PlanFormat != "explained" || events[0].Incomplete || strings.Contains(fmt.Sprint(events), "12345678") {
+		t.Fatalf("explained plan lost or argument leaked: %+v", events)
+	}
+}
+
+func TestExplainedPlanRejectsUntrustedLines(t *testing.T) {
+	for _, line := range []string{
+		"    -> Filter 'SECRET_CANARY'",
+		"    -> SECRET_CANARY",
+		"    -> Index \"UNCLOSED",
+		"    -> Filter /* SECRET_CANARY */",
+	} {
+		p := New()
+		events := p.Feed(record("EXECUTE_STATEMENT_START", "Statement 1:\n---\nSELECT 1 FROM T\n^^^^^^^^\nSelect Expression\n"+line) + record("TRACE_FINI", ""))
+		if len(events) != 1 || events[0].Plan != "" || !events[0].Incomplete || strings.Contains(events[0].Plan, "SECRET_CANARY") {
+			t.Fatalf("untrusted explained plan line retained: %+v", events)
+		}
+	}
+}
+
 func TestMultilineSQLCommentsAndBlankLines(t *testing.T) {
 	cases := []string{
 		"SELECT /*\n2026-09-05T20:11:08.5030 (29:0x1) EXECUTE_PROCEDURE_START\nProcedure SECRET_CANARY:\n*/ 1 FROM RDB$DATABASE",

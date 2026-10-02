@@ -97,6 +97,23 @@ if err != nil { return err }
 // Pass driverName to your existing database constructor. It still owns the pool.
 ```
 
+The Trace collector makes its own Services API connection. For a Firebird server
+whose SQL DSN uses `auth_plugin_name=Legacy_Auth&wire_crypt=false`, pass matching
+settings when starting the collector:
+
+```go
+wireCrypt := false
+err = server.Start(startupContext, fbtrace.Config{
+    Address: hostPort, User: diagnosticUser, Password: password,
+    Database: databasePath, Name: "billing-primary-diagnostics",
+    AuthPlugin: "Legacy_Auth", WireCrypt: &wireCrypt,
+})
+```
+
+These settings apply to the collector connection only. When omitted, the driver
+continues to use `Srp256` and wire encryption. The supported authentication
+plugins are `Srp256`, `Srp` and `Legacy_Auth`.
+
 `NewSpans` may run before connection configuration is loaded; pass the collector
 configuration to `Start` later, before serving database traffic. `Start` waits for
 readiness, and its context only bounds startup. On shutdown, stop database traffic,
@@ -132,6 +149,17 @@ The marker selects the client parent without matching names or timing windows.
 Text Trace nesting remains `firebird.correlation=heuristic`; it is not a guarantee
 of complete PSQL coverage. This does not produce a span for every SQL instruction
 inside PSQL. Table counters become span events, not invented timed table spans.
+When Firebird reports a sanitized execution plan for a statement, the server
+SQL span includes it as `firebird.query.plan` and labels the format in
+`firebird.query.plan.format`. The collector requests Firebird 5's explained
+tree, which shows record sources, index scans, filters, and sorts. Classic
+plans remain supported by the parser for older trace output. Unsupported or
+ambiguous plan text is omitted rather than exported raw; each plan is bounded
+to 4096 bytes. The deployed Cloud Trace exporter limits one string attribute
+to 256 bytes: long plans continue in ordered `firebird.query.plan.part.01`,
+`.02`, etc., with the total in `firebird.query.plan.parts`. This is a chosen
+access path, not the optimizer's reasoning or
+per-node runtime measurements.
 Server time is aligned to the local marker time and marked
 `firebird.clock.alignment=marker_estimate`; native timestamp differences determine
 duration, without assuming the server's timezone or clock synchronization.
@@ -179,8 +207,9 @@ Trace configuration container. Wildcards, quantifiers and backslashes cannot bro
 the selection. Control characters and embedded double quotes are rejected.
 Statements are sanitized before public event queuing. Procedure/function/trigger names,
 page counters and per-table counters are typed; tables are summaries, not timed spans.
-Classic PLAN lines (including JOIN, SORT, HASH and MERGE) are sanitized; other plan
-forms are omitted conservatively. Attachment/transaction/statement IDs are parsed
+Classic PLAN lines (including JOIN, SORT, HASH and MERGE) and supported explained
+record-source trees are sanitized; other plan forms are omitted conservatively.
+Attachment/transaction/statement IDs are parsed
 only in the metadata header, before SQL begins; ID-like SQL literal content cannot
 change the correlation scope. Blank SQL lines are preserved. PLAN recognition starts
 only after the native post-SQL caret separator and outside SQL literals/comments.

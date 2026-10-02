@@ -118,6 +118,7 @@ func TestFirebird5ServerSpans(t *testing.T) {
 	last.End()
 	for {
 		found := make(map[string]map[string]bool)
+		explainedPlan := false
 		counts := make(map[string]int)
 		all := make(map[otrace.SpanID]sdktrace.ReadOnlySpan)
 		snapshot := recorder.Ended()
@@ -136,6 +137,20 @@ func TestFirebird5ServerSpans(t *testing.T) {
 				found[kind] = make(map[string]bool)
 			}
 			found[kind][span.Name()] = true
+			if kind == "selectable" || kind == "query_row" {
+				var plan, format string
+				for _, attr := range span.Attributes() {
+					switch string(attr.Key) {
+					case "firebird.query.plan":
+						plan = attr.Value.AsString()
+					case "firebird.query.plan.format":
+						format = attr.Value.AsString()
+					}
+				}
+				if format == "explained" && strings.Contains(plan, "Select Expression") && strings.Contains(plan, `Procedure "OTEL_REPORT" Scan`) {
+					explainedPlan = true
+				}
+			}
 			parent, ok := all[span.Parent().SpanID()]
 			if !ok {
 				t.Fatal("missing actual parent", span.Name())
@@ -156,7 +171,7 @@ func TestFirebird5ServerSpans(t *testing.T) {
 				concurrent = false
 			}
 		}
-		if concurrent && found["direct"]["OTEL_NESTED_A"] && found["direct"]["OTEL_DOUBLE"] && found["direct"]["OTEL_A_CHANGED"] && found["prepared"]["OTEL_NESTED_A"] && found["prepared_again"]["OTEL_NESTED_A"] && found["selectable"]["OTEL_REPORT"] && found["query_row"]["OTEL_REPORT"] {
+		if concurrent && explainedPlan && found["direct"]["OTEL_NESTED_A"] && found["direct"]["OTEL_DOUBLE"] && found["direct"]["OTEL_A_CHANGED"] && found["prepared"]["OTEL_NESTED_A"] && found["prepared_again"]["OTEL_NESTED_A"] && found["selectable"]["OTEL_REPORT"] && found["query_row"]["OTEL_REPORT"] {
 			t.Logf("server spans by request: %+v", found)
 			return
 		}

@@ -5,8 +5,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -267,6 +270,7 @@ type serverTree struct {
 	nodes      []*serverNode
 	bySequence map[uint64]*serverNode
 	complete   bool
+	omitted    bool
 }
 
 func (s *SpanRuntime) consume(r *Runtime) {
@@ -280,8 +284,10 @@ func (s *SpanRuntime) consume(r *Runtime) {
 	active := make(map[uint64]int64)
 	activeByAttachment := make(map[int64]int)
 	drop := func(tree *serverTree, reason string) {
-		for seq := range tree.bySequence {
-			delete(frames, seq)
+		for seq, owner := range frames {
+			if owner == tree {
+				delete(frames, seq)
+			}
 		}
 		delete(trees, tree)
 		s.Discard(tree.token)
@@ -297,6 +303,27 @@ func (s *SpanRuntime) consume(r *Runtime) {
 		clear(pending)
 		clear(active)
 		clear(activeByAttachment)
+	}
+	invalidateAttachment := func(attachmentID int64, reason string) {
+		if attachmentID == 0 {
+			invalidate(reason)
+			return
+		}
+		for tree := range trees {
+			if tree.nodes[0].start.AttachmentID == attachmentID {
+				drop(tree, reason)
+			}
+		}
+		if p, ok := pending[attachmentID]; ok {
+			s.Discard(p.token)
+			delete(pending, attachmentID)
+		}
+		for seq, att := range active {
+			if att == attachmentID {
+				delete(active, seq)
+			}
+		}
+		delete(activeByAttachment, attachmentID)
 	}
 	flush := func() {
 		for tree := range trees {
@@ -355,7 +382,7 @@ func (s *SpanRuntime) consume(r *Runtime) {
 				}
 				if e.Sequence == 0 || e.Correlation == "unmatched" {
 					s.Discard(e.ScopeToken)
-					invalidate("unmatched_marker")
+					invalidateAttachment(e.AttachmentID, "unmatched_marker")
 					continue
 				}
 				delete(pending, e.AttachmentID)
@@ -370,7 +397,7 @@ func (s *SpanRuntime) consume(r *Runtime) {
 			}
 			if e.Sequence == 0 {
 				if e.Incomplete && (e.Kind == "statement" || e.Kind == "procedure" || e.Kind == "function" || e.Kind == "trigger") {
-					invalidate("unmatched")
+					invalidateAttachment(e.AttachmentID, "unmatched")
 				}
 				continue
 			}
@@ -394,8 +421,15 @@ func (s *SpanRuntime) consume(r *Runtime) {
 					drop(tree, "expired_or_ambiguous")
 					continue
 				}
-				if len(tree.nodes) >= 128 || len(frames) >= 4096 {
+				if len(frames) >= 4096 {
 					drop(tree, "overflow")
+					continue
+				}
+				if len(tree.nodes) >= 128 {
+					// Keep following active sequences for correlation, but retain only
+					// a bounded prefix of child spans. The root must still be exported.
+					tree.omitted = true
+					frames[e.Sequence] = tree
 					continue
 				}
 				n := &serverNode{start: e}
@@ -414,7 +448,11 @@ func (s *SpanRuntime) consume(r *Runtime) {
 				if tree == nil {
 					continue
 				}
+				delete(frames, e.Sequence)
 				n := tree.bySequence[e.Sequence]
+				if n == nil {
+					continue
+				}
 				n.finish = e
 				n.complete = true
 				if tree.nodes[0] == n {
@@ -427,7 +465,7 @@ func (s *SpanRuntime) consume(r *Runtime) {
 }
 
 func (s *SpanRuntime) exportTree(tree *serverTree) {
-	incomplete := false
+	incomplete := tree.omitted
 	for _, n := range tree.nodes {
 		incomplete = incomplete || !n.complete || n.start.Incomplete || n.finish.Incomplete
 	}
@@ -464,6 +502,29 @@ func (s *SpanRuntime) exportTree(tree *serverTree) {
 		if n.finish.SQL != "" {
 			attrs = append(attrs, attribute.String("db.query.text", n.finish.SQL))
 		}
+		if n.start.Kind == "statement" {
+			plan := n.start.Plan
+			if plan == "" {
+				plan = n.finish.Plan
+			}
+			if plan != "" {
+				parts := planParts(plan)
+				attrs = append(attrs, attribute.String("firebird.query.plan", parts[0]))
+				if len(parts) > 1 {
+					attrs = append(attrs, attribute.Int("firebird.query.plan.parts", len(parts)))
+					for i := 1; i < len(parts); i++ {
+						attrs = append(attrs, attribute.String(fmt.Sprintf("firebird.query.plan.part.%02d", i), parts[i]))
+					}
+				}
+				format := n.start.PlanFormat
+				if format == "" {
+					format = n.finish.PlanFormat
+				}
+				if format != "" {
+					attrs = append(attrs, attribute.String("firebird.query.plan.format", format))
+				}
+			}
+		}
 		name := n.start.Name
 		if name == "" {
 			name = n.start.Kind
@@ -480,4 +541,25 @@ func (s *SpanRuntime) exportTree(tree *serverTree) {
 		}
 		span.End(otrace.WithTimestamp(localAnchor.Add(end.Sub(tree.anchor))))
 	}
+}
+
+// The currently deployed Google Cloud Trace exporter truncates string values
+// at 256 bytes. Preserve the complete bounded plan across ordered attributes.
+func planParts(plan string) []string {
+	const maxPartBytes = 255
+	parts := make([]string, 0, 1+len(plan)/maxPartBytes)
+	for len(plan) > 0 {
+		end := min(len(plan), maxPartBytes)
+		for end > 0 && !utf8.ValidString(plan[:end]) {
+			end--
+		}
+		if end < len(plan) {
+			if newline := strings.LastIndexByte(plan[:end], '\n'); newline >= 160 {
+				end = newline + 1
+			}
+		}
+		parts = append(parts, plan[:end])
+		plan = plan[end:]
+	}
+	return parts
 }

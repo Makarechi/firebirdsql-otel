@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Makarechi/firebirdsql-otel/internal/sqltext"
+	fbprofiler "github.com/Makarechi/firebirdsql-otel/profiler"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -24,14 +25,16 @@ type telemetry struct {
 	spanAttrs, metricAttrs []attribute.KeyValue
 }
 type operation struct {
-	serverToken string
-	ctx         context.Context
-	start       time.Time
-	method      string
-	d           description
-	enabled     bool
-	fallback    bool
-	t           *telemetry
+	serverToken    string
+	profile        fbprofiler.SessionHandle
+	profileFailure func()
+	ctx            context.Context
+	start          time.Time
+	method         string
+	d              description
+	enabled        bool
+	fallback       bool
+	t              *telemetry
 }
 
 func newTelemetry(c Config) (*telemetry, error) {

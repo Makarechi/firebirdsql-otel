@@ -23,13 +23,19 @@ const shutdownDrainGrace = 250 * time.Millisecond
 
 type Config struct {
 	Address, User, Password, Database string
+	// AuthPlugin selects the Services API authentication plugin. Empty uses
+	// the driver's default (Srp256). Supported values are Srp256, Srp and Legacy_Auth.
+	AuthPlugin string
+	// WireCrypt controls Services API wire encryption. Nil keeps the driver's
+	// default (enabled); set a pointer to false only for servers that require it.
+	WireCrypt *bool
 	// Name is an operator-chosen, non-sensitive session name, useful for diagnostics.
 	Name   string
 	Buffer int
 }
 
 type traceSession interface {
-	WaitStringsContext(context.Context, chan string) error
+	WaitChunksContext(context.Context, chan string) error
 	CloseContext(context.Context) error
 }
 
@@ -37,18 +43,8 @@ type traceManager interface {
 	StartWithNameContext(context.Context, string, string) (traceSession, error)
 }
 
-type driverTraceManager struct{ *firebirdsql.TraceManager }
-
-func (m driverTraceManager) StartWithNameContext(ctx context.Context, name, config string) (traceSession, error) {
-	return m.TraceManager.StartWithNameContext(ctx, name, config)
-}
-
-var newTraceManager = func(address, user, password string) (traceManager, error) {
-	m, err := firebirdsql.NewTraceManager(address, user, password, firebirdsql.GetDefaultServiceManagerOptions())
-	if err != nil {
-		return nil, err
-	}
-	return driverTraceManager{m}, nil
+var newTraceManager = func(address, user, password string, options firebirdsql.ServiceManagerOptions) (traceManager, error) {
+	return bufferedTraceManager{address: address, user: user, password: password, options: options}, nil
 }
 
 type Runtime struct {
@@ -84,6 +80,9 @@ func Start(ctx context.Context, c Config) (*Runtime, error) {
 	if strings.ContainsAny(c.Name, "\r\n") {
 		return nil, errors.New("trace: invalid session name")
 	}
+	if c.AuthPlugin != "" && c.AuthPlugin != "Srp256" && c.AuthPlugin != "Srp" && c.AuthPlugin != "Legacy_Auth" {
+		return nil, errors.New("trace: invalid auth plugin")
+	}
 	filter, err := databaseFilter(c.Database)
 	if err != nil {
 		return nil, err
@@ -94,7 +93,14 @@ func Start(ctx context.Context, c Config) (*Runtime, error) {
 	if c.Buffer < 1 || c.Buffer > 256 {
 		return nil, errors.New("trace: invalid queue bound")
 	}
-	manager, err := newTraceManager(c.Address, c.User, c.Password)
+	options := firebirdsql.GetDefaultServiceManagerOptions()
+	if c.AuthPlugin != "" {
+		options.AuthPlugin = c.AuthPlugin
+	}
+	if c.WireCrypt != nil {
+		options.WireCrypt = *c.WireCrypt
+	}
+	manager, err := newTraceManager(c.Address, c.User, c.Password, options)
 	if err != nil {
 		return nil, errors.New("trace: manager creation failed")
 	}
@@ -132,6 +138,7 @@ func serverConfig(filter string) string {
  log_trigger_start = true
  log_trigger_finish = true
  print_plan = true
+ explain_plan = true
  print_perf = true
  time_threshold = 0
  max_sql_length = %d
@@ -149,7 +156,7 @@ func (r *Runtime) run(ctx context.Context) {
 	raw := make(chan string)
 	finished := make(chan error, 1)
 	go func() {
-		finished <- r.session.WaitStringsContext(ctx, raw)
+		finished <- r.session.WaitChunksContext(ctx, raw)
 		close(raw)
 	}()
 
@@ -230,9 +237,7 @@ func (r *Runtime) run(ctx context.Context) {
 				emit(parser.Flush())
 				return
 			}
-			// WaitStringsContext uses Firebird's isc_info_svc_line API and returns
-			// one line without its delimiter. Restore that documented delimiter.
-			if !emit(parser.Feed(chunk + "\n")) {
+			if !emit(parser.Feed(chunk)) {
 				r.finish(nil)
 				return
 			}

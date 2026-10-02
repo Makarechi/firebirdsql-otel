@@ -6,6 +6,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Makarechi/firebirdsql-otel/internal/sqltext"
+	fbprofiler "github.com/Makarechi/firebirdsql-otel/profiler"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
@@ -51,10 +52,12 @@ type ServerTrace interface {
 	Bind(string, trace.SpanContext)
 	Discard(string)
 }
+
 type Config struct {
 	// ServerTrace optionally associates sampled operations with a separately started
 	// server collector. It adds a reserved session marker query before execution.
 	ServerTrace    ServerTrace
+	ServerProfiler fbprofiler.Starter
 	Profile        Profile
 	SQL            SQLPolicy
 	Connection     ConnectionAttributes
@@ -83,8 +86,8 @@ func normalizeConfig(c Config) (Config, error) {
 	if c.Profile != Compatibility && c.Profile != SafeClient && c.Profile != Diagnostic {
 		return c, errors.New("firebirdotel: invalid profile")
 	}
-	if c.Profile == Compatibility && c.ServerTrace != nil {
-		return c, errors.New("firebirdotel: server tracing requires a safe client profile")
+	if c.Profile == Compatibility && (c.ServerTrace != nil || c.ServerProfiler != nil) {
+		return c, errors.New("firebirdotel: server diagnostics require a safe client profile")
 	}
 	if c.Profile != Compatibility && len(c.OTelOptions) > 0 {
 		return c, errors.New("firebirdotel: OTelOptions are only supported in compatibility mode; use explicit Config fields")

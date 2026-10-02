@@ -25,14 +25,14 @@ type Table struct {
 }
 type Event struct {
 	// ScopeToken is an opaque instrumentation marker, never SQL or a context value.
-	ScopeToken                                        string
-	Source, Correlation, Kind, Phase, Name, SQL, Plan string
-	Timestamp                                         string
-	AttachmentID, TransactionID, StatementID          int64
-	Sequence, ParentSequence                          uint64
-	DurationMS, Reads, Writes, Fetches, Marks         int64
-	Tables                                            []Table
-	Incomplete                                        bool
+	ScopeToken                                                    string
+	Source, Correlation, Kind, Phase, Name, SQL, Plan, PlanFormat string
+	Timestamp                                                     string
+	AttachmentID, TransactionID, StatementID                      int64
+	Sequence, ParentSequence                                      uint64
+	DurationMS, Reads, Writes, Fetches, Marks                     int64
+	Tables                                                        []Table
+	Incomplete                                                    bool
 }
 type frame struct {
 	kind, name string
@@ -279,11 +279,13 @@ func (p *Parser) consume(line string) []Event {
 	}
 	if trim == "" {
 		p.collectSQL = false
+		p.planSection = false
 		return nil
 	}
 	if p.planSection && strings.HasPrefix(trim, "PLAN ") {
 		d := sqltext.AnalyzeUnknownDialect(trim, 0, 0)
 		if d.Valid && d.Text != "" {
+			e.PlanFormat = "classic"
 			if e.Plan == "" {
 				e.Plan = d.Text
 			} else if len(e.Plan)+1+len(d.Text) <= sqltext.MaxOutput {
@@ -295,6 +297,21 @@ func (p *Parser) consume(line string) []Event {
 			e.Incomplete = true
 		}
 		p.collectSQL = false
+		return nil
+	}
+	if p.planSection && (trim == "Select Expression" || e.PlanFormat == "explained") {
+		if safe, ok := explainedPlanLine(line, e.Plan == ""); ok && len(e.Plan)+len(safe)+1 <= sqltext.MaxOutput {
+			if e.Plan != "" {
+				e.Plan += "\n"
+			}
+			e.Plan += safe
+			e.PlanFormat = "explained"
+		} else {
+			e.Plan = ""
+			e.PlanFormat = ""
+			e.Incomplete = true
+			p.planSection = false
+		}
 		return nil
 	}
 	if p.performanceSection && strings.HasPrefix(line, "Table") && strings.Contains(line, "   Natural     Index") {
@@ -312,11 +329,13 @@ func (p *Parser) consume(line string) []Event {
 	}
 	if parameterMetadata(line) || trim == "returns:" || fetched.MatchString(trim) || affected.MatchString(trim) {
 		p.collectSQL = false
+		p.planSection = false
 		return nil
 	}
 	matches := perf.FindAllStringSubmatch(trim, -1)
 	if performanceLine.MatchString(trim) {
 		p.performanceSection = true
+		p.planSection = false
 		for _, m := range matches {
 			v, _ := strconv.ParseInt(m[1], 10, 64)
 			switch strings.TrimSpace(m[2]) {
@@ -343,6 +362,52 @@ func (p *Parser) consume(line string) []Event {
 		p.sql.WriteByte('\n')
 	}
 	return nil
+}
+
+// The explained plan is emitted by Firebird after its native SQL/plan separator.
+// Accept only known record-source shapes, reject literals/comments, and keep the
+// complete tree within the same bound as the classic plan.
+func explainedPlanLine(line string, root bool) (string, bool) {
+	if root {
+		return "Select Expression", line == "Select Expression"
+	}
+	if len(line) > 512 {
+		return "", false
+	}
+	indent := len(line) - len(strings.TrimLeft(line, " "))
+	if indent < 4 || indent > 64 || indent%4 != 0 || !strings.HasPrefix(line[indent:], "-> ") {
+		return "", false
+	}
+	node := strings.TrimPrefix(line[indent:], "-> ")
+	if !knownExplainedNode(node) || strings.ContainsAny(node, "'\r\t;{}") || strings.Contains(node, "--") || strings.Contains(node, "/*") || strings.Contains(node, "*/") {
+		return "", false
+	}
+	d := sqltext.Analyze(node, 512, 512)
+	if !d.Valid || d.Text == "" {
+		return "", false
+	}
+	for _, r := range node {
+		if unicode.IsControl(r) {
+			return "", false
+		}
+	}
+	return line, true
+}
+
+func knownExplainedNode(node string) bool {
+	switch node {
+	case "Filter", "Bitmap", "Bitmap And", "Bitmap Or", "DBKEY", "Singular", "Aggregate", "Union", "Recursive Union":
+		return true
+	}
+	for _, prefix := range []string{
+		"First ", "Skip ", "Sort (", "Table \"", "Index \"", "Procedure \"", "Function \"",
+		"Nested Loop Join", "Hash Join", "Merge Join", "Window", "Record Buffer", "Materialize",
+	} {
+		if strings.HasPrefix(node, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func tableCounterRow(line string, minimumNameWidth int) (Table, bool) {
