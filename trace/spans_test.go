@@ -396,6 +396,7 @@ func TestServerStatementSpanExportsExecutionPlan(t *testing.T) {
 	}{
 		{name: "plan on start", startPlan: "PLAN ( T ORDER IDX_ID )", wantPlan: "PLAN ( T ORDER IDX_ID )"},
 		{name: "plan on finish", finishPlan: "PLAN SORT ( T INDEX ( IDX_CONTRACT ) )", wantPlan: "PLAN SORT ( T INDEX ( IDX_CONTRACT ) )"},
+		{name: "explained plan", startPlan: "Select Expression\n    -> Filter", wantPlan: "Select Expression\n    -> Filter"},
 		{name: "missing plan"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

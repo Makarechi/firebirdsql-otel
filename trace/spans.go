@@ -506,6 +506,13 @@ func (s *SpanRuntime) exportTree(tree *serverTree) {
 			}
 			if plan != "" {
 				attrs = append(attrs, attribute.String("firebird.query.plan", plan))
+				format := n.start.PlanFormat
+				if format == "" {
+					format = n.finish.PlanFormat
+				}
+				if format != "" {
+					attrs = append(attrs, attribute.String("firebird.query.plan.format", format))
+				}
 			}
 		}
 		name := n.start.Name

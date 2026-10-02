@@ -149,9 +149,14 @@ The marker selects the client parent without matching names or timing windows.
 Text Trace nesting remains `firebird.correlation=heuristic`; it is not a guarantee
 of complete PSQL coverage. This does not produce a span for every SQL instruction
 inside PSQL. Table counters become span events, not invented timed table spans.
-When Firebird reports a sanitized classic execution plan for a statement, the
-server SQL span includes it as `firebird.query.plan`. Unsupported or ambiguous
-plan text is omitted rather than exported raw.
+When Firebird reports a sanitized execution plan for a statement, the server
+SQL span includes it as `firebird.query.plan` and labels the format in
+`firebird.query.plan.format`. The collector requests Firebird 5's explained
+tree, which shows record sources, index scans, filters, and sorts. Classic
+plans remain supported by the parser for older trace output. Unsupported or
+ambiguous plan text is omitted rather than exported raw; each plan is bounded
+to 4096 bytes. This is a chosen access path, not the optimizer's reasoning or
+per-node runtime measurements.
 Server time is aligned to the local marker time and marked
 `firebird.clock.alignment=marker_estimate`; native timestamp differences determine
 duration, without assuming the server's timezone or clock synchronization.
@@ -199,8 +204,9 @@ Trace configuration container. Wildcards, quantifiers and backslashes cannot bro
 the selection. Control characters and embedded double quotes are rejected.
 Statements are sanitized before public event queuing. Procedure/function/trigger names,
 page counters and per-table counters are typed; tables are summaries, not timed spans.
-Classic PLAN lines (including JOIN, SORT, HASH and MERGE) are sanitized; other plan
-forms are omitted conservatively. Attachment/transaction/statement IDs are parsed
+Classic PLAN lines (including JOIN, SORT, HASH and MERGE) and supported explained
+record-source trees are sanitized; other plan forms are omitted conservatively.
+Attachment/transaction/statement IDs are parsed
 only in the metadata header, before SQL begins; ID-like SQL literal content cannot
 change the correlation scope. Blank SQL lines are preserved. PLAN recognition starts
 only after the native post-SQL caret separator and outside SQL literals/comments.

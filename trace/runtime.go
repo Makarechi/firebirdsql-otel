@@ -138,6 +138,7 @@ func serverConfig(filter string) string {
  log_trigger_start = true
  log_trigger_finish = true
  print_plan = true
+ explain_plan = true
  print_perf = true
  time_threshold = 0
  max_sql_length = %d
