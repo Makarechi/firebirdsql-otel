@@ -226,7 +226,8 @@ func (r *Runtime) report(ctx context.Context, id int64, span trace.Span) error {
 			AND r.RECORD_SOURCE_ID = s.RECORD_SOURCE_ID
 		JOIN PLG$PROF_STATEMENTS p ON p.PROFILE_ID = s.PROFILE_ID AND p.STATEMENT_ID = s.STATEMENT_ID
 		WHERE s.PROFILE_ID = ?
-			AND (p.SQL_TEXT IS NULL OR p.SQL_TEXT NOT STARTING WITH 'SELECT RDB$PROFILER.START_SESSION(')
+			AND (p.SQL_TEXT IS NULL OR (p.SQL_TEXT NOT STARTING WITH 'SELECT RDB$PROFILER.START_SESSION('
+				AND p.SQL_TEXT NOT CONTAINING 'firebirdotel_scope:'))
 		ORDER BY s.OPEN_TOTAL_ELAPSED_TIME + s.FETCH_TOTAL_ELAPSED_TIME DESC
 		ROWS 65`
 	rows, err := r.db.QueryContext(ctx, query, id)
@@ -272,8 +273,8 @@ func (r *Runtime) report(ctx context.Context, id int64, span trace.Span) error {
 }
 
 func safeAccessPath(path string) string {
-	path = strings.TrimSpace(path)
-	if len(path) == 0 || len(path) > 160 {
+	path = strings.Join(strings.Fields(path), " ")
+	if len(path) == 0 || len(path) > 512 {
 		return ""
 	}
 	for _, char := range path {
