@@ -554,7 +554,7 @@ func planParts(plan string) []string {
 			end--
 		}
 		if end < len(plan) {
-			if newline := strings.LastIndexByte(plan[:end], '\n'); newline >= 224 {
+			if newline := strings.LastIndexByte(plan[:end], '\n'); newline >= 160 {
 				end = newline + 1
 			}
 		}

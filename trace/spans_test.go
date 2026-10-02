@@ -444,6 +444,14 @@ func TestPlanPartsFitCloudTraceAndPreserveTree(t *testing.T) {
 	}
 }
 
+func TestPlanPartsPreferCompleteSteps(t *testing.T) {
+	plan := "Select Expression\n    -> First N Records\n        -> Filter\n            -> Table \"OBJ$CONTRACT_PERSONAL_DETAIL\" Access By ID\n                -> Index \"PK_OBJ$CONTRACT_PERSONAL_DETAIL\" Full Scan\n                    -> Bitmap\n                        -> Index \"FK_OBJ$CONTRACT_PERS_DETAIL_1\" Range Scan (full match)"
+	parts := planParts(plan)
+	if len(parts) != 2 || !strings.HasSuffix(parts[0], "-> Bitmap\n") || !strings.HasPrefix(parts[1], "                        -> Index ") || strings.Join(parts, "") != plan {
+		t.Fatalf("record-source step split unnecessarily: %#v", parts)
+	}
+}
+
 func attributeMap(attrs []attribute.KeyValue) map[string]attribute.Value {
 	out := make(map[string]attribute.Value, len(attrs))
 	for _, a := range attrs {
