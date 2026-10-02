@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql/driver"
 	"sync"
+	"sync/atomic"
 )
 
 //go:generate python3 internal/generate/capabilities.py
@@ -21,6 +22,7 @@ type connState struct {
 	t             *telemetry
 	txMu          sync.Mutex
 	txCtx         context.Context
+	profileDirty  atomic.Bool
 }
 
 func (c *connState) Unwrap() driver.Conn { return c.raw }
@@ -78,24 +80,29 @@ func (c *connState) begin(ctx context.Context, opts driver.TxOptions, withCtx bo
 func (c *connState) Exec(q string, args []driver.Value) (driver.Result, error) {
 	op := c.t.start(context.Background(), "exec", c.t.describe(q))
 	op.fallback = true // database/sql retries only these connection fast paths.
+	c.profileStart(&op)
 	c.serverScope(&op)
 	r, err := c.raw.(driver.Execer).Exec(q, args)
 	c.preserveFallbackToken(&op, err, q)
-	c.t.finish(op, err, resultAttributes(r))
+	sc := c.t.finish(op, err, resultAttributes(r))
+	c.profileFinish(&op, sc, err)
 	return r, err
 }
 func (c *connState) ExecContext(ctx context.Context, q string, args []driver.NamedValue) (driver.Result, error) {
 	op := c.t.start(ctx, "exec", c.t.describe(q))
 	op.fallback = true // database/sql retries only these connection fast paths.
+	c.profileStart(&op)
 	c.serverScope(&op)
 	r, err := c.raw.(driver.ExecerContext).ExecContext(ctx, q, args)
 	c.preserveFallbackToken(&op, err, q)
-	c.t.finish(op, err, resultAttributes(r))
+	sc := c.t.finish(op, err, resultAttributes(r))
+	c.profileFinish(&op, sc, err)
 	return r, err
 }
 func (c *connState) Query(q string, args []driver.Value) (driver.Rows, error) {
 	op := c.t.start(context.Background(), "query", c.t.describe(q))
 	op.fallback = true // database/sql retries only these connection fast paths.
+	c.profileStart(&op)
 	c.serverScope(&op)
 	r, err := c.raw.(driver.Queryer).Query(q, args)
 	c.preserveFallbackToken(&op, err, q)
@@ -104,6 +111,7 @@ func (c *connState) Query(q string, args []driver.Value) (driver.Rows, error) {
 func (c *connState) QueryContext(ctx context.Context, q string, args []driver.NamedValue) (driver.Rows, error) {
 	op := c.t.start(ctx, "query", c.t.describe(q))
 	op.fallback = true // database/sql retries only these connection fast paths.
+	c.profileStart(&op)
 	c.serverScope(&op)
 	r, err := c.raw.(driver.QueryerContext).QueryContext(ctx, q, args)
 	c.preserveFallbackToken(&op, err, q)
@@ -121,7 +129,9 @@ func (c *connState) ResetSession(ctx context.Context) error {
 	c.t.finish(op, err, nil)
 	return err
 }
-func (c *connState) IsValid() bool { return c.raw.(driver.Validator).IsValid() }
+func (c *connState) IsValid() bool {
+	return !c.profileDirty.Load() && c.raw.(driver.Validator).IsValid()
+}
 func (c *connState) CheckNamedValue(v *driver.NamedValue) error {
 	return c.raw.(driver.NamedValueChecker).CheckNamedValue(v)
 }
@@ -143,26 +153,32 @@ func (s *stmtState) Close() error {
 func (s *stmtState) NumInput() int { return s.raw.NumInput() }
 func (s *stmtState) Exec(args []driver.Value) (driver.Result, error) {
 	op := s.t.start(context.Background(), "exec", s.d)
+	s.conn.profileStart(&op)
 	s.serverScope(&op)
 	r, err := s.raw.Exec(args)
-	s.t.finish(op, err, resultAttributes(r))
+	sc := s.t.finish(op, err, resultAttributes(r))
+	s.conn.profileFinish(&op, sc, err)
 	return r, err
 }
 func (s *stmtState) ExecContext(ctx context.Context, args []driver.NamedValue) (driver.Result, error) {
 	op := s.t.start(ctx, "exec", s.d)
+	s.conn.profileStart(&op)
 	s.serverScope(&op)
 	r, err := s.raw.(driver.StmtExecContext).ExecContext(ctx, args)
-	s.t.finish(op, err, resultAttributes(r))
+	sc := s.t.finish(op, err, resultAttributes(r))
+	s.conn.profileFinish(&op, sc, err)
 	return r, err
 }
 func (s *stmtState) Query(args []driver.Value) (driver.Rows, error) {
 	op := s.t.start(context.Background(), "query", s.d)
+	s.conn.profileStart(&op)
 	s.serverScope(&op)
 	r, err := s.raw.Query(args)
 	return s.conn.queryResult(op, r, err)
 }
 func (s *stmtState) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
 	op := s.t.start(ctx, "query", s.d)
+	s.conn.profileStart(&op)
 	s.serverScope(&op)
 	r, err := s.raw.(driver.StmtQueryContext).QueryContext(ctx, args)
 	return s.conn.queryResult(op, r, err)

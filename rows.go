@@ -40,6 +40,27 @@ func (t *telemetry) queryResult(op operation, r driver.Rows, err error, txContex
 }
 func (t *telemetry) queryResultWithClose(op operation, r driver.Rows, err error, onClose func(), txContexts ...context.Context) (driver.Rows, error) {
 	sc := t.finish(op, err, nil)
+	if op.profile != nil {
+		if err == driver.ErrSkip {
+			if profileErr := op.profile.Cancel(); profileErr != nil && op.profileFailure != nil {
+				op.profileFailure()
+			}
+		} else if err != nil || r == nil {
+			if profileErr := op.profile.Finish(sc); profileErr != nil && op.profileFailure != nil {
+				op.profileFailure()
+			}
+		} else {
+			prior := onClose
+			onClose = func() {
+				if prior != nil {
+					prior()
+				}
+				if profileErr := op.profile.Finish(sc); profileErr != nil && op.profileFailure != nil {
+					op.profileFailure()
+				}
+			}
+		}
+	}
 	if err != nil {
 		return r, err
 	}
