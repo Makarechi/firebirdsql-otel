@@ -5,8 +5,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -505,7 +508,14 @@ func (s *SpanRuntime) exportTree(tree *serverTree) {
 				plan = n.finish.Plan
 			}
 			if plan != "" {
-				attrs = append(attrs, attribute.String("firebird.query.plan", plan))
+				parts := planParts(plan)
+				attrs = append(attrs, attribute.String("firebird.query.plan", parts[0]))
+				if len(parts) > 1 {
+					attrs = append(attrs, attribute.Int("firebird.query.plan.parts", len(parts)))
+					for i := 1; i < len(parts); i++ {
+						attrs = append(attrs, attribute.String(fmt.Sprintf("firebird.query.plan.part.%02d", i), parts[i]))
+					}
+				}
 				format := n.start.PlanFormat
 				if format == "" {
 					format = n.finish.PlanFormat
@@ -531,4 +541,25 @@ func (s *SpanRuntime) exportTree(tree *serverTree) {
 		}
 		span.End(otrace.WithTimestamp(localAnchor.Add(end.Sub(tree.anchor))))
 	}
+}
+
+// The currently deployed Google Cloud Trace exporter truncates string values
+// at 256 bytes. Preserve the complete bounded plan across ordered attributes.
+func planParts(plan string) []string {
+	const maxPartBytes = 255
+	parts := make([]string, 0, 1+len(plan)/maxPartBytes)
+	for len(plan) > 0 {
+		end := min(len(plan), maxPartBytes)
+		for end > 0 && !utf8.ValidString(plan[:end]) {
+			end--
+		}
+		if end < len(plan) {
+			if newline := strings.LastIndexByte(plan[:end], '\n'); newline >= 224 {
+				end = newline + 1
+			}
+		}
+		parts = append(parts, plan[:end])
+		plan = plan[end:]
+	}
+	return parts
 }

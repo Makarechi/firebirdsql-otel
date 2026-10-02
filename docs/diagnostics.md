@@ -155,7 +155,10 @@ SQL span includes it as `firebird.query.plan` and labels the format in
 tree, which shows record sources, index scans, filters, and sorts. Classic
 plans remain supported by the parser for older trace output. Unsupported or
 ambiguous plan text is omitted rather than exported raw; each plan is bounded
-to 4096 bytes. This is a chosen access path, not the optimizer's reasoning or
+to 4096 bytes. The deployed Cloud Trace exporter limits one string attribute
+to 256 bytes: long plans continue in ordered `firebird.query.plan.part.01`,
+`.02`, etc., with the total in `firebird.query.plan.parts`. This is a chosen
+access path, not the optimizer's reasoning or
 per-node runtime measurements.
 Server time is aligned to the local marker time and marked
 `firebird.clock.alignment=marker_estimate`; native timestamp differences determine

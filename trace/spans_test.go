@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -427,6 +428,19 @@ func TestServerStatementSpanExportsExecutionPlan(t *testing.T) {
 				t.Fatalf("plan = %q, present = %t; want %q", got.AsString(), ok, tc.wantPlan)
 			}
 		})
+	}
+}
+
+func TestPlanPartsFitCloudTraceAndPreserveTree(t *testing.T) {
+	plan := "Select Expression\n" + strings.Repeat("    -> Table \"Договор\" Access By ID\n        -> Index \"FK_CONTRACT_DETAIL\" Range Scan (full match)\n", 20)
+	parts := planParts(plan)
+	if len(parts) < 2 || strings.Join(parts, "") != plan {
+		t.Fatalf("plan not preserved across parts: %d parts", len(parts))
+	}
+	for i, part := range parts {
+		if len(part) > 255 || !utf8.ValidString(part) {
+			t.Fatalf("part %d exceeds Cloud Trace limit or splits UTF-8: %q", i, part)
+		}
 	}
 }
 
