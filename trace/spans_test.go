@@ -204,6 +204,85 @@ func TestUnmatchedExecutionDiscardsActiveTree(t *testing.T) {
 	<-s.done
 }
 
+func TestUnmatchedOtherAttachmentPreservesActiveTree(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	defer tp.Shutdown(context.Background())
+	s, err := NewSpans(SpanConfig{TracerProvider: tp})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.running = true
+	_, parent := tp.Tracer("application").Start(context.Background(), "client")
+	defer parent.End()
+	token := s.Register(parent.SpanContext())
+	s.Bind(token, parent.SpanContext())
+	r := &Runtime{events: make(chan Event), done: make(chan struct{})}
+	go s.consume(r)
+	base := Event{Source: "trace", Correlation: "heuristic", Timestamp: "2026-09-17T08:00:00.0000", AttachmentID: 1, TransactionID: 2}
+	marker := base
+	marker.Kind, marker.Phase, marker.ScopeToken, marker.Sequence = "statement", "finish", token, 99
+	r.events <- marker
+	root := base
+	root.Kind, root.Phase, root.Name, root.Sequence = "statement", "start", "SELECT T", 1
+	r.events <- root
+	r.events <- Event{Kind: "procedure", Phase: "finish", Incomplete: true, Correlation: "unmatched", AttachmentID: 7, TransactionID: 8}
+	r.events <- Event{Kind: "statement", Phase: "finish", ScopeToken: strings.Repeat("0", 32), Incomplete: true, Correlation: "unmatched", AttachmentID: 7, TransactionID: 8}
+	root.Phase, root.Timestamp = "finish", "2026-09-17T08:00:00.0010"
+	r.events <- root
+	close(r.done)
+	close(r.events)
+	<-s.done
+	spans := recorder.Ended()
+	if len(spans) != 1 || spans[0].Name() != "SELECT T" || spans[0].Parent().SpanID() != parent.SpanContext().SpanID() {
+		t.Fatal("unrelated attachment discarded the active tree", spans)
+	}
+}
+
+func TestLargeServerTreeKeepsRootSpan(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	defer tp.Shutdown(context.Background())
+	s, err := NewSpans(SpanConfig{TracerProvider: tp})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.running = true
+	_, parent := tp.Tracer("application").Start(context.Background(), "client")
+	defer parent.End()
+	token := s.Register(parent.SpanContext())
+	s.Bind(token, parent.SpanContext())
+	r := &Runtime{events: make(chan Event), done: make(chan struct{})}
+	go s.consume(r)
+	base := Event{Source: "trace", Correlation: "heuristic", Timestamp: "2026-09-17T08:00:00.0000", AttachmentID: 1, TransactionID: 2}
+	marker := base
+	marker.Kind, marker.Phase, marker.ScopeToken, marker.Sequence = "statement", "finish", token, 99
+	r.events <- marker
+	root := base
+	root.Kind, root.Phase, root.Name, root.Sequence = "statement", "start", "SELECT VIEW", 1
+	r.events <- root
+	for i := uint64(2); i <= 202; i++ {
+		child := base
+		child.Kind, child.Phase, child.Name, child.Sequence, child.ParentSequence = "procedure", "start", "LOOKUP", i, 1
+		r.events <- child
+		child.Phase = "finish"
+		r.events <- child
+	}
+	root.Phase, root.Timestamp = "finish", "2026-09-17T08:00:00.0100"
+	r.events <- root
+	close(r.done)
+	close(r.events)
+	<-s.done
+	spans := recorder.Ended()
+	if len(spans) != 128 {
+		t.Fatalf("got %d spans, want bounded root plus children", len(spans))
+	}
+	rootSpan := spans[0]
+	if rootSpan.Name() != "SELECT VIEW" || rootSpan.Parent().SpanID() != parent.SpanContext().SpanID() || !attributeMap(rootSpan.Attributes())["firebird.incomplete"].AsBool() {
+		t.Fatal("large query lost its incomplete parent span", rootSpan)
+	}
+}
+
 func TestUnmatchedMarkerCannotCreateServerTree(t *testing.T) {
 	s, err := NewSpans(SpanConfig{})
 	if err != nil {
