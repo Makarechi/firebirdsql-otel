@@ -2,6 +2,8 @@ package trace
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"testing"
@@ -427,7 +429,93 @@ func TestServerStatementSpanExportsExecutionPlan(t *testing.T) {
 			} else if !ok || got.AsString() != tc.wantPlan {
 				t.Fatalf("plan = %q, present = %t; want %q", got.AsString(), ok, tc.wantPlan)
 			}
+			if tc.wantPlan != "" {
+				sum := sha256.Sum256([]byte(strings.Join(strings.Fields(tc.wantPlan), " ")))
+				fingerprint := attributeMap(spans[0].Attributes())["firebird.query.plan.fingerprint"].AsString()
+				if fingerprint != hex.EncodeToString(sum[:12]) {
+					t.Fatalf("plan fingerprint = %s", fingerprint)
+				}
+			}
 		})
+	}
+}
+
+func TestCompactServerTreeRetainsSlowAndNestedCalls(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	defer tp.Shutdown(context.Background())
+	s, err := NewSpans(SpanConfig{TracerProvider: tp, CollapseFastRepeats: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, parent := tp.Tracer("application").Start(context.Background(), "client")
+	defer parent.End()
+	anchor := time.Date(2026, 10, 3, 8, 0, 0, 0, time.UTC)
+	stamp := func(ms int) string {
+		return anchor.Add(time.Duration(ms) * time.Millisecond).Format("2006-01-02T15:04:05.999999999")
+	}
+	node := func(seq, parentSeq uint64, kind, name string, startMS, endMS int) *serverNode {
+		start := Event{Sequence: seq, ParentSequence: parentSeq, Kind: kind, Name: name, Timestamp: stamp(startMS)}
+		finish := start
+		finish.Timestamp = stamp(endMS)
+		finish.DurationMS = int64(endMS - startMS)
+		return &serverNode{start: start, finish: finish, complete: true}
+	}
+	tree := &serverTree{scope: scope{parent: parent.SpanContext(), registered: anchor}, anchor: anchor, nodes: []*serverNode{
+		node(1, 0, "statement", "SELECT T", 0, 10),
+		node(2, 1, "procedure", "LOOKUP", 1, 1),
+		node(3, 1, "procedure", "LOOKUP", 2, 2),
+		node(4, 1, "procedure", "LOOKUP", 3, 3),
+		node(5, 1, "procedure", "LOOKUP", 4, 8),
+		node(6, 1, "procedure", "NESTED", 5, 6),
+		node(7, 6, "procedure", "CHILD", 5, 5),
+	}}
+	s.exportTree(tree)
+	spans := recorder.Ended()
+	if len(spans) != 4 {
+		t.Fatalf("got %d spans, want root, slow lookup, nested parent and child", len(spans))
+	}
+	rootAttrs := attributeMap(spans[0].Attributes())
+	if rootAttrs["firebird.server.repeated_calls.collapsed"].AsInt64() != 3 || len(spans[0].Events()) != 1 {
+		t.Fatalf("repeat summary missing: attrs=%v events=%v", rootAttrs, spans[0].Events())
+	}
+	if attributeMap(spans[0].Events()[0].Attributes)["call_count"].AsInt64() != 3 {
+		t.Fatal("wrong repeated call count")
+	}
+	if spans[1].Name() != "LOOKUP" || spans[2].Name() != "NESTED" || spans[3].Name() != "CHILD" {
+		t.Fatalf("slow or nested detail missing: %s, %s, %s", spans[1].Name(), spans[2].Name(), spans[3].Name())
+	}
+}
+
+func TestCompactServerTreeCountsLargeRepeatGroup(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	defer tp.Shutdown(context.Background())
+	s, err := NewSpans(SpanConfig{TracerProvider: tp, CollapseFastRepeats: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, parent := tp.Tracer("application").Start(context.Background(), "client")
+	defer parent.End()
+	anchor := time.Date(2026, 10, 3, 8, 0, 0, 0, time.UTC)
+	stamp := anchor.Format("2006-01-02T15:04:05.999999999")
+	root := &serverNode{start: Event{Kind: "statement", Name: "SELECT T", Sequence: 1, Timestamp: stamp}, finish: Event{Kind: "statement", Sequence: 1, Timestamp: stamp}, complete: true}
+	tree := &serverTree{scope: scope{parent: parent.SpanContext(), registered: anchor}, anchor: anchor, nodes: []*serverNode{root}}
+	for i := uint64(2); i <= 366; i++ {
+		start := Event{Kind: "procedure", Name: "LOOKUP", Sequence: i, ParentSequence: 1, Timestamp: stamp, Incomplete: true}
+		tree.nodes = append(tree.nodes, &serverNode{start: start, finish: Event{Timestamp: stamp, Incomplete: true}, complete: true})
+	}
+	s.exportTree(tree)
+	spans := recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("got %d spans, want one summarized statement", len(spans))
+	}
+	attrs := attributeMap(spans[0].Attributes())
+	if attrs["firebird.server.repeated_calls.collapsed"].AsInt64() != 365 {
+		t.Fatal("lost repeat count", attrs)
+	}
+	if !attrs["firebird.incomplete"].AsBool() {
+		t.Fatal("partial repeat detail lost its incomplete marker")
 	}
 }
 
