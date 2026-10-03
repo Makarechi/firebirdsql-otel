@@ -5,12 +5,41 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
+
+func TestProfilerDurationBucketsResolveMillisecondCosts(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	defer provider.Shutdown(context.Background())
+	runtime := &Runtime{name: "primary"}
+	runtime.initMetrics(provider)
+	runtime.recordStage("cleanup", 40*time.Millisecond, nil)
+	var got metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &got); err != nil {
+		t.Fatal(err)
+	}
+	for _, scope := range got.ScopeMetrics {
+		for _, value := range scope.Metrics {
+			if value.Name != "firebird.profiler.stage.duration" {
+				continue
+			}
+			points := value.Data.(metricdata.Histogram[float64]).DataPoints
+			if len(points) != 1 || len(points[0].Bounds) < 6 || points[0].Bounds[5] != .05 {
+				t.Fatalf("unexpected profiler histogram boundaries: %+v", points)
+			}
+			return
+		}
+	}
+	t.Fatal("profiler duration histogram missing")
+}
 
 func TestCheckSupportedRejectsReadOnlyReplica(t *testing.T) {
 	for _, tc := range []struct {

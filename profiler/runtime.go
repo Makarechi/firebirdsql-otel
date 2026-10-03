@@ -62,7 +62,10 @@ func WithMeterProvider(provider metric.MeterProvider) Option {
 
 func (r *Runtime) initMetrics(provider metric.MeterProvider) {
 	meter := provider.Meter("github.com/Makarechi/firebirdsql-otel/profiler")
-	r.stageDuration, _ = meter.Float64Histogram("firebird.profiler.stage.duration", metric.WithUnit("s"))
+	r.stageDuration, _ = meter.Float64Histogram("firebird.profiler.stage.duration",
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(.001, .002, .005, .01, .02, .05, .1, .2, .5, 1, 2, 5),
+	)
 	r.stageCalls, _ = meter.Int64Counter("firebird.profiler.stage.calls")
 	r.staleRemoved, _ = meter.Int64Counter("firebird.profiler.stale.removed")
 }
