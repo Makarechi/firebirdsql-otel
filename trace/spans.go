@@ -27,7 +27,7 @@ type SpanConfig struct {
 	MeterProvider  metric.MeterProvider
 	MaxPending     int
 	Retention      time.Duration
-	// CollapseFastRepeats groups repeated leaf procedures lasting at most 1 ms.
+	// CollapseFastRepeats groups repeated leaf procedures lasting at most 2 ms.
 	CollapseFastRepeats bool
 }
 
@@ -429,7 +429,11 @@ func (s *SpanRuntime) consume(r *Runtime) {
 					drop(tree, "overflow")
 					continue
 				}
-				if len(tree.nodes) >= 128 {
+				maxNodes := 128
+				if s.c.CollapseFastRepeats {
+					maxNodes = 512
+				}
+				if len(tree.nodes) >= maxNodes {
 					// Keep following active sequences for correlation, but retain only
 					// a bounded prefix of child spans. The root must still be exported.
 					tree.omitted = true
@@ -474,12 +478,23 @@ func (s *SpanRuntime) exportTree(tree *serverTree) {
 		incomplete = incomplete || !n.complete || n.start.Incomplete || n.finish.Incomplete
 	}
 	collapsed, repeated := s.repeatedLeaves(tree)
+	visible := 0
+	for _, n := range tree.nodes {
+		if n.complete && !collapsed[n.start.Sequence] {
+			visible++
+		}
+	}
+	incomplete = incomplete || visible > 128
 	parents := make(map[uint64]otrace.SpanContext)
+	exported := 0
 	for _, n := range tree.nodes {
 		if !n.complete {
 			continue
 		}
 		if collapsed[n.start.Sequence] {
+			continue
+		}
+		if exported >= 128 {
 			continue
 		}
 		start, err := time.Parse("2006-01-02T15:04:05.999999999", n.start.Timestamp)
@@ -556,6 +571,7 @@ func (s *SpanRuntime) exportTree(tree *serverTree) {
 			localAnchor = tree.scope.registered
 		}
 		_, span := s.tracer.Start(ctx, name, otrace.WithSpanKind(otrace.SpanKindInternal), otrace.WithTimestamp(localAnchor.Add(start.Sub(tree.anchor))), otrace.WithAttributes(attrs...))
+		exported++
 		parents[n.start.Sequence] = span.SpanContext()
 		if n == tree.nodes[0] {
 			for _, group := range repeated {
@@ -600,7 +616,7 @@ func (s *SpanRuntime) repeatedLeaves(tree *serverTree) (map[uint64]bool, []repea
 	}
 	groups := make(map[groupKey]*repeatedGroup)
 	for _, n := range tree.nodes[1:] {
-		if !n.complete || n.start.Incomplete || n.finish.Incomplete || n.start.Kind != "procedure" || hasChildren[n.start.Sequence] {
+		if !n.complete || n.start.Kind != "procedure" || hasChildren[n.start.Sequence] {
 			continue
 		}
 		durationMS := float64(n.finish.DurationMS)
@@ -610,7 +626,7 @@ func (s *SpanRuntime) repeatedLeaves(tree *serverTree) (map[uint64]bool, []repea
 			continue
 		}
 		durationMS = max(durationMS, float64(end.Sub(start))/float64(time.Millisecond))
-		if durationMS > 1 {
+		if durationMS > 2 {
 			continue
 		}
 		key := groupKey{n.start.ParentSequence, n.start.Name}
