@@ -31,13 +31,14 @@ const cleanupTimeout = 5 * time.Second
 var poolName = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
 
 type Runtime struct {
-	db            *sql.DB
-	name          string
-	tracer        trace.Tracer
-	stageDuration metric.Float64Histogram
-	stageCalls    metric.Int64Counter
-	staleRemoved  metric.Int64Counter
-	meterProvider metric.MeterProvider
+	db             *sql.DB
+	name           string
+	tracer         trace.Tracer
+	stageDuration  metric.Float64Histogram
+	stageCalls     metric.Int64Counter
+	staleRemoved   metric.Int64Counter
+	staleRemaining metric.Int64Gauge
+	meterProvider  metric.MeterProvider
 }
 
 type Option func(*Runtime)
@@ -68,6 +69,7 @@ func (r *Runtime) initMetrics(provider metric.MeterProvider) {
 	)
 	r.stageCalls, _ = meter.Int64Counter("firebird.profiler.stage.calls")
 	r.staleRemoved, _ = meter.Int64Counter("firebird.profiler.stale.removed")
+	r.staleRemaining, _ = meter.Int64Gauge("firebird.profiler.stale.remaining")
 }
 
 func (r *Runtime) recordStage(stage string, elapsed time.Duration, err error) {
@@ -211,12 +213,19 @@ func (s *Session) Finish(client trace.SpanContext) error {
 	}
 	deleteCtx, deleteCancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	started = time.Now()
-	deleteErr := s.runtime.delete(deleteCtx, s.id)
+	acquireDuration, executeDuration, acquireErr, executeErr := s.runtime.delete(deleteCtx, s.id)
+	deleteErr := errors.Join(acquireErr, executeErr)
 	cleanupDuration := time.Since(started)
 	s.overhead += cleanupDuration
 	s.runtime.recordStage("cleanup", cleanupDuration, deleteErr)
+	s.runtime.recordStage("cleanup_acquire", acquireDuration, acquireErr)
+	if acquireErr == nil {
+		s.runtime.recordStage("cleanup_execute", executeDuration, executeErr)
+	}
 	s.span.SetAttributes(
 		attribute.Float64("firebird.profiler.cleanup_ms", float64(cleanupDuration)/float64(time.Millisecond)),
+		attribute.Float64("firebird.profiler.cleanup.acquire_ms", float64(acquireDuration)/float64(time.Millisecond)),
+		attribute.Float64("firebird.profiler.cleanup.execute_ms", float64(executeDuration)/float64(time.Millisecond)),
 		attribute.Float64("firebird.profiler.overhead_ms", float64(s.overhead)/float64(time.Millisecond)),
 	)
 	deleteCancel()
@@ -385,14 +394,24 @@ func safeAccessPath(path string) string {
 	return path
 }
 
-func (r *Runtime) delete(ctx context.Context, id int64) error {
-	_, err := r.db.ExecContext(ctx, `DELETE FROM PLG$PROF_SESSIONS WHERE PROFILE_ID = ?`, id)
-	return err
+func (r *Runtime) delete(ctx context.Context, id int64) (time.Duration, time.Duration, error, error) {
+	started := time.Now()
+	conn, err := r.db.Conn(ctx)
+	acquire := time.Since(started)
+	if err != nil {
+		return acquire, 0, err, nil
+	}
+	defer conn.Close()
+	started = time.Now()
+	_, err = conn.ExecContext(ctx, `DELETE FROM PLG$PROF_SESSIONS WHERE PROFILE_ID = ?`, id)
+	return acquire, time.Since(started), nil, err
 }
 
 // CleanupStale removes only this pool's finished profiles left by an interrupted
 // export. First use of the profiler creates its tables, so an absent table is fine.
-func (r *Runtime) CleanupStale(ctx context.Context, olderThan time.Duration) error {
+func (r *Runtime) CleanupStale(ctx context.Context, olderThan time.Duration) (err error) {
+	started := time.Now()
+	defer func() { r.recordStage("stale_cleanup", time.Since(started), err) }()
 	if olderThan <= 0 {
 		return errors.New("profiler: invalid cleanup age")
 	}
@@ -403,14 +422,24 @@ func (r *Runtime) CleanupStale(ctx context.Context, olderThan time.Duration) err
 	if exists == 0 {
 		return nil
 	}
-	result, err := r.db.ExecContext(ctx, `DELETE FROM PLG$PROF_SESSIONS WHERE DESCRIPTION STARTING WITH ? AND FINISH_TIMESTAMP < ?`,
-		fmt.Sprintf("firebirdotel/%s/", r.name), time.Now().Add(-olderThan))
+	prefix, cutoff := fmt.Sprintf("firebirdotel/%s/", r.name), time.Now().Add(-olderThan)
+	result, err := r.db.ExecContext(ctx, `DELETE FROM PLG$PROF_SESSIONS WHERE DESCRIPTION STARTING WITH ? AND FINISH_TIMESTAMP < ?`, prefix, cutoff)
 	if err == nil && r.staleRemoved != nil {
 		if count, countErr := result.RowsAffected(); countErr == nil && count > 0 {
 			r.staleRemoved.Add(context.Background(), count, metric.WithAttributes(attribute.String("pool", r.name)))
 		}
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	var remaining int64
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM PLG$PROF_SESSIONS WHERE DESCRIPTION STARTING WITH ? AND FINISH_TIMESTAMP < ?`, prefix, cutoff).Scan(&remaining); err != nil {
+		return err
+	}
+	if r.staleRemaining != nil {
+		r.staleRemaining.Record(context.Background(), remaining, metric.WithAttributes(attribute.String("pool", r.name)))
+	}
+	return nil
 }
 
 var _ io.Closer = (*Runtime)(nil)

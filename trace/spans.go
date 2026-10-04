@@ -473,9 +473,10 @@ func (s *SpanRuntime) consume(r *Runtime) {
 }
 
 func (s *SpanRuntime) exportTree(tree *serverTree) {
-	incomplete := tree.omitted
+	sourceEvent, unpaired := false, false
 	for _, n := range tree.nodes {
-		incomplete = incomplete || !n.complete || n.start.Incomplete || n.finish.Incomplete
+		sourceEvent = sourceEvent || n.start.Incomplete || n.finish.Incomplete
+		unpaired = unpaired || !n.complete
 	}
 	collapsed, repeated := s.repeatedLeaves(tree)
 	visible := 0
@@ -484,7 +485,21 @@ func (s *SpanRuntime) exportTree(tree *serverTree) {
 			visible++
 		}
 	}
-	incomplete = incomplete || visible > 128
+	exportLimit := visible > 128
+	incomplete := sourceEvent || unpaired || tree.omitted || exportLimit
+	reasons := make([]string, 0, 4)
+	if sourceEvent {
+		reasons = append(reasons, "source_event")
+	}
+	if unpaired {
+		reasons = append(reasons, "unpaired")
+	}
+	if tree.omitted {
+		reasons = append(reasons, "collection_limit")
+	}
+	if exportLimit {
+		reasons = append(reasons, "export_limit")
+	}
 	parents := make(map[uint64]otrace.SpanContext)
 	exported := 0
 	for _, n := range tree.nodes {
@@ -518,6 +533,13 @@ func (s *SpanRuntime) exportTree(tree *serverTree) {
 			attribute.Int64("firebird.server.duration_ms", n.finish.DurationMS),
 			attribute.Int64("firebird.pages.read", n.finish.Reads), attribute.Int64("firebird.pages.write", n.finish.Writes),
 			attribute.Int64("firebird.pages.fetch", n.finish.Fetches), attribute.Int64("firebird.pages.mark", n.finish.Marks),
+		}
+		if n == tree.nodes[0] {
+			attrs = append(attrs,
+				attribute.String("firebird.incomplete.reasons", strings.Join(reasons, ",")),
+				attribute.Int("firebird.server.nodes.collected", len(tree.nodes)),
+				attribute.Int("firebird.server.nodes.exportable", visible),
+			)
 		}
 		if n == tree.nodes[0] && len(collapsed) > 0 {
 			attrs = append(attrs, attribute.Int("firebird.server.repeated_calls.collapsed", len(collapsed)),

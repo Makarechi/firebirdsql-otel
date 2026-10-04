@@ -86,6 +86,64 @@ func TestSafeAccessPathPreservesMultilineIndexPlan(t *testing.T) {
 	}
 }
 
+func TestDeleteMeasuresConnectionAndExecutionSeparately(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectExec("DELETE FROM PLG\\$PROF_SESSIONS WHERE PROFILE_ID").WithArgs(int64(17)).WillReturnResult(sqlmock.NewResult(0, 1))
+	acquire, execute, acquireErr, executeErr := (&Runtime{db: db}).delete(context.Background(), 17)
+	if acquireErr != nil || executeErr != nil || acquire < 0 || execute <= 0 {
+		t.Fatalf("delete phases: acquire=%s execute=%s errors=%v/%v", acquire, execute, acquireErr, executeErr)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCleanupStaleCountsRemainingProfiles(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	defer provider.Shutdown(context.Background())
+	runtime := &Runtime{db: db, name: "primary"}
+	runtime.initMetrics(provider)
+	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM RDB\\$RELATIONS").WillReturnRows(sqlmock.NewRows([]string{"COUNT"}).AddRow(1))
+	mock.ExpectExec("DELETE FROM PLG\\$PROF_SESSIONS WHERE DESCRIPTION").WithArgs("firebirdotel/primary/", sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM PLG\\$PROF_SESSIONS WHERE DESCRIPTION").WithArgs("firebirdotel/primary/", sqlmock.AnyArg()).WillReturnRows(sqlmock.NewRows([]string{"COUNT"}).AddRow(1))
+	if err := runtime.CleanupStale(context.Background(), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	var got metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &got); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, scope := range got.ScopeMetrics {
+		for _, value := range scope.Metrics {
+			if value.Name != "firebird.profiler.stale.remaining" {
+				continue
+			}
+			points := value.Data.(metricdata.Gauge[int64]).DataPoints
+			if len(points) != 1 || points[0].Value != 1 {
+				t.Fatalf("remaining profiles = %+v", points)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("remaining-profile gauge missing")
+	}
+}
+
 func TestReportExportsTopSourcesAndBoundsDetail(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {

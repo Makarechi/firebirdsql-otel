@@ -284,6 +284,10 @@ func TestLargeServerTreeKeepsRootSpan(t *testing.T) {
 	if rootSpan.Name() != "SELECT VIEW" || rootSpan.Parent().SpanID() != parent.SpanContext().SpanID() || !attributeMap(rootSpan.Attributes())["firebird.incomplete"].AsBool() {
 		t.Fatal("large query lost its incomplete parent span", rootSpan)
 	}
+	attrs := attributeMap(rootSpan.Attributes())
+	if attrs["firebird.incomplete.reasons"].AsString() != "collection_limit" || attrs["firebird.server.nodes.exportable"].AsInt64() != 128 {
+		t.Fatal("bounded trace does not explain its limits", attrs)
+	}
 }
 
 func TestUnmatchedMarkerCannotCreateServerTree(t *testing.T) {
@@ -516,6 +520,9 @@ func TestCompactServerTreeCountsLargeRepeatGroup(t *testing.T) {
 	}
 	if !attrs["firebird.incomplete"].AsBool() {
 		t.Fatal("partial repeat detail lost its incomplete marker")
+	}
+	if attrs["firebird.incomplete.reasons"].AsString() != "source_event" || attrs["firebird.server.nodes.collected"].AsInt64() != 366 || attrs["firebird.server.nodes.exportable"].AsInt64() != 1 {
+		t.Fatal("repeat trace does not explain its incompleteness", attrs)
 	}
 }
 
