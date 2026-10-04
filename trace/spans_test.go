@@ -458,6 +458,9 @@ func TestPlanClassificationAndFingerprintRetainStructure(t *testing.T) {
 	if !flags.sort || !flags.natural || flags.indexFull {
 		t.Fatalf("classic plan was not classified: %+v", flags)
 	}
+	if flags := classifyPlan("PLAN MERGE (SORT (T NATURAL), SORT (U NATURAL))"); !flags.sort || !flags.natural {
+		t.Fatalf("nested classic sort was missed: %+v", flags)
+	}
 	if flags := classifyPlan(`PLAN ("NATURAL" INDEX ("SORT_QUEUE"))`); flags.natural || flags.sort {
 		t.Fatalf("quoted object name mistaken for an operator: %+v", flags)
 	}

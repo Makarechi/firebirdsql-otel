@@ -707,7 +707,7 @@ func normalizePlan(plan string) string {
 type planFlags struct{ sort, natural, indexRange, indexFull bool }
 
 var (
-	classicSort          = regexp.MustCompile(`(?i)\bPLAN\s+SORT\b`)
+	classicSort          = regexp.MustCompile(`(?i)\bSORT\s*\(`)
 	classicNatural       = regexp.MustCompile(`(?i)\bNATURAL\b`)
 	quotedPlanIdentifier = regexp.MustCompile(`"(?:""|[^"])*"`)
 	explainedSort        = regexp.MustCompile(`(?i)^\s*->\s*Sort(?:\s|$)`)

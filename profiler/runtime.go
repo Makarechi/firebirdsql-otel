@@ -420,16 +420,26 @@ func safeAccessPath(path string) string {
 }
 
 func (r *Runtime) delete(ctx context.Context, id int64) (time.Duration, time.Duration, error, error) {
-	started := time.Now()
-	conn, err := r.db.Conn(ctx)
-	acquire := time.Since(started)
-	if err != nil {
-		return acquire, 0, err, nil
+	var acquire, execute time.Duration
+	var err error
+	// An explicit sql.Conn exposes pool wait time, but unlike DB.ExecContext it
+	// does not retry driver.ErrBadConn. Retry on a fresh diagnostic connection.
+	for attempt := 0; attempt < 3; attempt++ {
+		started := time.Now()
+		conn, acquireErr := r.db.Conn(ctx)
+		acquire += time.Since(started)
+		if acquireErr != nil {
+			return acquire, execute, acquireErr, err
+		}
+		started = time.Now()
+		_, err = conn.ExecContext(ctx, `DELETE FROM PLG$PROF_SESSIONS WHERE PROFILE_ID = ?`, id)
+		execute += time.Since(started)
+		_ = conn.Close()
+		if !errors.Is(err, driver.ErrBadConn) || ctx.Err() != nil {
+			return acquire, execute, nil, err
+		}
 	}
-	defer conn.Close()
-	started = time.Now()
-	_, err = conn.ExecContext(ctx, `DELETE FROM PLG$PROF_SESSIONS WHERE PROFILE_ID = ?`, id)
-	return acquire, time.Since(started), nil, err
+	return acquire, execute, nil, err
 }
 
 // CleanupStale removes only this pool's finished profiles left by an interrupted
@@ -458,8 +468,13 @@ func (r *Runtime) CleanupStale(ctx context.Context, olderThan time.Duration) (er
 		return err
 	}
 	var remaining int64
-	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM PLG$PROF_SESSIONS WHERE DESCRIPTION STARTING WITH ? AND FINISH_TIMESTAMP < ?`, prefix, cutoff).Scan(&remaining); err != nil {
-		return err
+	countStarted := time.Now()
+	countErr := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM PLG$PROF_SESSIONS WHERE DESCRIPTION STARTING WITH ? AND FINISH_TIMESTAMP < ?`, prefix, cutoff).Scan(&remaining)
+	r.recordStage("stale_count", time.Since(countStarted), countErr)
+	if countErr != nil {
+		// The DELETE succeeded. Report the gauge failure separately without
+		// making a completed sweep look like a failed cleanup.
+		return nil
 	}
 	if r.staleRemaining != nil {
 		r.staleRemaining.Record(context.Background(), remaining, metric.WithAttributes(attribute.String("pool", r.name)))

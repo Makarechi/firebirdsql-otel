@@ -2,6 +2,7 @@ package profiler
 
 import (
 	"context"
+	"database/sql"
 	"database/sql/driver"
 	"errors"
 	"strings"
@@ -106,6 +107,41 @@ func TestDeleteMeasuresConnectionAndExecutionSeparately(t *testing.T) {
 	}
 }
 
+type retryConnector struct{ opens, execs int }
+
+func (c *retryConnector) Connect(context.Context) (driver.Conn, error) {
+	c.opens++
+	return &retryConn{connector: c}, nil
+}
+func (c *retryConnector) Driver() driver.Driver { return retryDriver{} }
+
+type retryDriver struct{}
+
+func (retryDriver) Open(string) (driver.Conn, error) { return nil, errors.New("unused") }
+
+type retryConn struct {
+	failingFinishConn
+	connector *retryConnector
+}
+
+func (c *retryConn) ExecContext(_ context.Context, _ string, _ []driver.NamedValue) (driver.Result, error) {
+	c.connector.execs++
+	if c.connector.execs == 1 {
+		return nil, driver.ErrBadConn
+	}
+	return driver.RowsAffected(1), nil
+}
+
+func TestDeleteRetriesBadDiagnosticConnection(t *testing.T) {
+	connector := &retryConnector{}
+	db := sql.OpenDB(connector)
+	defer db.Close()
+	acquire, execute, acquireErr, executeErr := (&Runtime{db: db}).delete(context.Background(), 17)
+	if acquireErr != nil || executeErr != nil || acquire < 0 || execute <= 0 || connector.opens != 2 || connector.execs != 2 {
+		t.Fatalf("retry failed: acquire=%s execute=%s errors=%v/%v", acquire, execute, acquireErr, executeErr)
+	}
+}
+
 func TestCleanupStaleCountsRemainingProfiles(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -147,6 +183,59 @@ func TestCleanupStaleCountsRemainingProfiles(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("remaining-profile gauge missing")
+	}
+}
+
+func TestCleanupStaleGaugeFailureDoesNotUndoSuccessfulSweep(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	defer provider.Shutdown(context.Background())
+	runtime := &Runtime{db: db, name: "primary"}
+	if err := runtime.initMetrics(provider); err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM RDB\\$RELATIONS").WillReturnRows(sqlmock.NewRows([]string{"COUNT"}).AddRow(1))
+	mock.ExpectExec("DELETE FROM PLG\\$PROF_SESSIONS WHERE DESCRIPTION").WithArgs("firebirdotel/primary/", sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM PLG\\$PROF_SESSIONS WHERE DESCRIPTION").WithArgs("firebirdotel/primary/", sqlmock.AnyArg()).WillReturnError(errors.New("gauge query failed"))
+	if err := runtime.CleanupStale(context.Background(), time.Hour); err != nil {
+		t.Fatalf("successful deletion reported failed: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	var metrics metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &metrics); err != nil {
+		t.Fatal(err)
+	}
+	seenGaugeError, seenCleanupOK := false, false
+	for _, scope := range metrics.ScopeMetrics {
+		for _, value := range scope.Metrics {
+			if value.Name != "firebird.profiler.stage.calls" {
+				continue
+			}
+			for _, point := range value.Data.(metricdata.Sum[int64]).DataPoints {
+				attrs := point.Attributes.ToSlice()
+				stage, outcome := "", ""
+				for _, kv := range attrs {
+					if kv.Key == "stage" {
+						stage = kv.Value.AsString()
+					}
+					if kv.Key == "outcome" {
+						outcome = kv.Value.AsString()
+					}
+				}
+				seenGaugeError = seenGaugeError || stage == "stale_count" && outcome == "error"
+				seenCleanupOK = seenCleanupOK || stage == "stale_cleanup" && outcome == "ok"
+			}
+		}
+	}
+	if !seenGaugeError || !seenCleanupOK {
+		t.Fatal("gauge error was not separated from successful sweep")
 	}
 }
 
