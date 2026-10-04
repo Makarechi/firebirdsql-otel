@@ -699,9 +699,35 @@ func normalizePlan(plan string) string {
 		lines[i] = strings.TrimRight(lines[i], " \t")
 	}
 	if len(lines) == 1 {
-		return strings.Join(strings.Fields(lines[0]), " ")
+		return normalizeClassicPlan(lines[0])
 	}
 	return strings.Join(lines, "\n")
+}
+
+func normalizeClassicPlan(plan string) string {
+	var normalized strings.Builder
+	quoted, space := false, false
+	for _, char := range plan {
+		if char == '"' {
+			if space && normalized.Len() > 0 {
+				normalized.WriteByte(' ')
+			}
+			space = false
+			quoted = !quoted
+			normalized.WriteRune(char)
+			continue
+		}
+		if !quoted && (char == ' ' || char == '\t') {
+			space = true
+			continue
+		}
+		if space && normalized.Len() > 0 {
+			normalized.WriteByte(' ')
+		}
+		space = false
+		normalized.WriteRune(char)
+	}
+	return normalized.String()
 }
 
 type planFlags struct{ sort, natural, indexRange, indexFull bool }
@@ -718,8 +744,8 @@ var (
 
 func classifyPlan(plan string) planFlags {
 	var flags planFlags
-	if !strings.Contains(plan, "->") {
-		operators := quotedPlanIdentifier.ReplaceAllString(plan, "")
+	operators := quotedPlanIdentifier.ReplaceAllString(plan, "")
+	if !strings.Contains(operators, "->") {
 		flags.sort = classicSort.MatchString(operators)
 		flags.natural = classicNatural.MatchString(operators)
 		return flags

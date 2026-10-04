@@ -464,6 +464,15 @@ func TestPlanClassificationAndFingerprintRetainStructure(t *testing.T) {
 	if flags := classifyPlan(`PLAN ("NATURAL" INDEX ("SORT_QUEUE"))`); flags.natural || flags.sort {
 		t.Fatalf("quoted object name mistaken for an operator: %+v", flags)
 	}
+	if flags := classifyPlan(`PLAN ("A->B" NATURAL)`); !flags.natural || flags.sort {
+		t.Fatalf("quoted arrow mistaken for explained plan: %+v", flags)
+	}
+	if normalizePlan(`PLAN ("A  B" NATURAL)`) == normalizePlan(`PLAN ("A B" NATURAL)`) {
+		t.Fatal("quoted identifier whitespace disappeared from plan fingerprint")
+	}
+	if normalizePlan("PLAN   ( T\tNATURAL )") != normalizePlan("PLAN ( T NATURAL )") {
+		t.Fatal("insignificant classic-plan whitespace changed fingerprint")
+	}
 	left := normalizePlan("Select Expression\r\n    -> Filter  \r\n        -> Index \"IDX\" Full Scan")
 	right := normalizePlan("Select Expression\n        -> Filter\n    -> Index \"IDX\" Full Scan")
 	if left == right || left != normalizePlan("Select Expression\n    -> Filter\n        -> Index \"IDX\" Full Scan") {
