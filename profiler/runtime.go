@@ -61,15 +61,29 @@ func WithMeterProvider(provider metric.MeterProvider) Option {
 	}
 }
 
-func (r *Runtime) initMetrics(provider metric.MeterProvider) {
+func (r *Runtime) initMetrics(provider metric.MeterProvider) error {
 	meter := provider.Meter("github.com/Makarechi/firebirdsql-otel/profiler")
-	r.stageDuration, _ = meter.Float64Histogram("firebird.profiler.stage.duration",
+	var err error
+	r.stageDuration, err = meter.Float64Histogram("firebird.profiler.stage.duration",
 		metric.WithUnit("s"),
 		metric.WithExplicitBucketBoundaries(.001, .002, .005, .01, .02, .05, .1, .2, .5, 1, 2, 5),
 	)
-	r.stageCalls, _ = meter.Int64Counter("firebird.profiler.stage.calls")
-	r.staleRemoved, _ = meter.Int64Counter("firebird.profiler.stale.removed")
-	r.staleRemaining, _ = meter.Int64Gauge("firebird.profiler.stale.remaining")
+	if err != nil {
+		return errors.New("profiler: metric initialization failed")
+	}
+	r.stageCalls, err = meter.Int64Counter("firebird.profiler.stage.calls")
+	if err != nil {
+		return errors.New("profiler: metric initialization failed")
+	}
+	r.staleRemoved, err = meter.Int64Counter("firebird.profiler.stale.removed")
+	if err != nil {
+		return errors.New("profiler: metric initialization failed")
+	}
+	r.staleRemaining, err = meter.Int64Gauge("firebird.profiler.stale.remaining")
+	if err != nil {
+		return errors.New("profiler: metric initialization failed")
+	}
+	return nil
 }
 
 func (r *Runtime) recordStage(stage string, elapsed time.Duration, err error) {
@@ -116,7 +130,10 @@ func New(dsn, name string, options ...Option) (*Runtime, error) {
 			option(r)
 		}
 	}
-	r.initMetrics(r.meterProvider)
+	if err := r.initMetrics(r.meterProvider); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return r, nil
 }
 
@@ -192,8 +209,16 @@ func (s *Session) Finish(client trace.SpanContext) error {
 	s.overhead += finishDuration
 	s.runtime.recordStage("finish", finishDuration, finishErr)
 	s.span.SetAttributes(attribute.Float64("firebird.profiler.finish_ms", float64(finishDuration)/float64(time.Millisecond)))
+	var cancelErr error
 	if finishErr != nil {
-		_, _ = exec(finishCtx, s.conn, "EXECUTE PROCEDURE RDB$PROFILER.CANCEL_SESSION")
+		cancelCtx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+		started = time.Now()
+		_, cancelErr = exec(cancelCtx, s.conn, "EXECUTE PROCEDURE RDB$PROFILER.CANCEL_SESSION")
+		cancelDuration := time.Since(started)
+		cancel()
+		s.overhead += cancelDuration
+		s.runtime.recordStage("cancel", cancelDuration, cancelErr)
+		s.span.SetAttributes(attribute.Float64("firebird.profiler.cancel_ms", float64(cancelDuration)/float64(time.Millisecond)))
 		s.span.SetStatus(codes.Error, "finish_failed")
 	}
 	finishCancel()
@@ -234,11 +259,11 @@ func (s *Session) Finish(client trace.SpanContext) error {
 	} else {
 		s.span.SetAttributes(attribute.Bool("firebird.profiler.cleaned", true))
 	}
-	if err := errors.Join(finishErr, readErr, deleteErr); err != nil {
+	if err := errors.Join(finishErr, cancelErr, readErr, deleteErr); err != nil {
 		for _, stage := range []struct {
 			name string
 			err  error
-		}{{"finish", finishErr}, {"read", readErr}, {"cleanup", deleteErr}} {
+		}{{"finish", finishErr}, {"cancel", cancelErr}, {"read", readErr}, {"cleanup", deleteErr}} {
 			if stage.err == nil {
 				continue
 			}

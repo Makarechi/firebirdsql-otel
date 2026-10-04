@@ -2,6 +2,7 @@ package profiler
 
 import (
 	"context"
+	"database/sql/driver"
 	"errors"
 	"strings"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -20,7 +22,9 @@ func TestProfilerDurationBucketsResolveMillisecondCosts(t *testing.T) {
 	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	defer provider.Shutdown(context.Background())
 	runtime := &Runtime{name: "primary"}
-	runtime.initMetrics(provider)
+	if err := runtime.initMetrics(provider); err != nil {
+		t.Fatal(err)
+	}
 	runtime.recordStage("cleanup", 40*time.Millisecond, nil)
 	var got metricdata.ResourceMetrics
 	if err := reader.Collect(context.Background(), &got); err != nil {
@@ -112,7 +116,9 @@ func TestCleanupStaleCountsRemainingProfiles(t *testing.T) {
 	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	defer provider.Shutdown(context.Background())
 	runtime := &Runtime{db: db, name: "primary"}
-	runtime.initMetrics(provider)
+	if err := runtime.initMetrics(provider); err != nil {
+		t.Fatal(err)
+	}
 	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM RDB\\$RELATIONS").WillReturnRows(sqlmock.NewRows([]string{"COUNT"}).AddRow(1))
 	mock.ExpectExec("DELETE FROM PLG\\$PROF_SESSIONS WHERE DESCRIPTION").WithArgs("firebirdotel/primary/", sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 2))
 	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM PLG\\$PROF_SESSIONS WHERE DESCRIPTION").WithArgs("firebirdotel/primary/", sqlmock.AnyArg()).WillReturnRows(sqlmock.NewRows([]string{"COUNT"}).AddRow(1))
@@ -177,6 +183,97 @@ func TestReportExportsTopSourcesAndBoundsDetail(t *testing.T) {
 	}
 	if attrs["firebird.profiler.top.01.ms"].AsFloat64() != 66 || attrs["firebird.profiler.top.05.fetch_count"].AsInt64() != 5 {
 		t.Fatalf("top source summary wrong: %v", attrs)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type rejectingMeterProvider struct{ metric.MeterProvider }
+
+func (rejectingMeterProvider) Meter(string, ...metric.MeterOption) metric.Meter {
+	return rejectingMeter{}
+}
+
+type rejectingMeter struct{ metric.Meter }
+
+func (rejectingMeter) Float64Histogram(string, ...metric.Float64HistogramOption) (metric.Float64Histogram, error) {
+	return nil, errors.New("private provider detail")
+}
+
+func TestNewRejectsMetricInitializationFailure(t *testing.T) {
+	runtime, err := New("user:secret@localhost/database", "primary", WithMeterProvider(rejectingMeterProvider{}))
+	if runtime != nil || err == nil || !strings.Contains(err.Error(), "metric initialization failed") || strings.Contains(err.Error(), "private") {
+		t.Fatalf("runtime=%v error=%v", runtime, err)
+	}
+}
+
+type failingFinishConn struct{}
+
+func (failingFinishConn) Prepare(string) (driver.Stmt, error) { return nil, errors.New("unused") }
+func (failingFinishConn) Close() error                        { return nil }
+func (failingFinishConn) Begin() (driver.Tx, error)           { return nil, errors.New("unused") }
+func (failingFinishConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
+	if strings.Contains(query, "FINISH_SESSION") {
+		return nil, errors.New("finish failed")
+	}
+	if strings.Contains(query, "CANCEL_SESSION") {
+		time.Sleep(2 * time.Millisecond)
+		return driver.RowsAffected(1), nil
+	}
+	return nil, errors.New("unexpected query")
+}
+
+func TestFinishCountsFallbackCancellationOverhead(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectExec("DELETE FROM PLG\\$PROF_SESSIONS WHERE PROFILE_ID").WithArgs(int64(17)).WillReturnResult(sqlmock.NewResult(0, 1))
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	defer provider.Shutdown(context.Background())
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	defer tp.Shutdown(context.Background())
+	_, span := tp.Tracer("test").Start(context.Background(), "profile")
+	runtime := &Runtime{db: db, name: "primary"}
+	if err := runtime.initMetrics(provider); err != nil {
+		t.Fatal(err)
+	}
+	session := &Session{runtime: runtime, conn: failingFinishConn{}, span: span, id: 17}
+	if err := session.Finish(span.SpanContext()); err == nil {
+		t.Fatal("expected finish failure")
+	}
+	attrs := make(map[string]attribute.Value)
+	for _, kv := range recorder.Ended()[0].Attributes() {
+		attrs[string(kv.Key)] = kv.Value
+	}
+	if attrs["firebird.profiler.cancel_ms"].AsFloat64() < 2 || attrs["firebird.profiler.overhead_ms"].AsFloat64() < attrs["firebird.profiler.cancel_ms"].AsFloat64() {
+		t.Fatalf("fallback cancellation omitted from overhead: %v", attrs)
+	}
+	var metrics metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &metrics); err != nil {
+		t.Fatal(err)
+	}
+	foundCancel := false
+	for _, scope := range metrics.ScopeMetrics {
+		for _, value := range scope.Metrics {
+			if value.Name != "firebird.profiler.stage.calls" {
+				continue
+			}
+			for _, point := range value.Data.(metricdata.Sum[int64]).DataPoints {
+				for _, kv := range point.Attributes.ToSlice() {
+					if kv.Key == "stage" && kv.Value.AsString() == "cancel" {
+						foundCancel = true
+					}
+				}
+			}
+		}
+	}
+	if !foundCancel {
+		t.Fatal("fallback cancellation stage metric missing")
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

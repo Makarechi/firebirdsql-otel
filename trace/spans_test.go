@@ -434,13 +434,105 @@ func TestServerStatementSpanExportsExecutionPlan(t *testing.T) {
 				t.Fatalf("plan = %q, present = %t; want %q", got.AsString(), ok, tc.wantPlan)
 			}
 			if tc.wantPlan != "" {
-				sum := sha256.Sum256([]byte(strings.Join(strings.Fields(tc.wantPlan), " ")))
+				sum := sha256.Sum256([]byte(normalizePlan(tc.wantPlan)))
 				fingerprint := attributeMap(spans[0].Attributes())["firebird.query.plan.fingerprint"].AsString()
 				if fingerprint != hex.EncodeToString(sum[:12]) {
 					t.Fatalf("plan fingerprint = %s", fingerprint)
 				}
 			}
 		})
+	}
+}
+
+func TestPlanClassificationAndFingerprintRetainStructure(t *testing.T) {
+	plan := "Select Expression\n    -> Table \"SORT_QUEUE\" Full Scan\n    -> Index \"IDX\" Range Scan"
+	flags := classifyPlan(plan)
+	if flags.sort || !flags.natural || !flags.indexRange || flags.indexFull {
+		t.Fatalf("unrelated operations were combined: %+v", flags)
+	}
+	flags = classifyPlan("Select Expression\n    -> Index \"IDX\" Full Scan")
+	if !flags.indexFull || flags.natural {
+		t.Fatalf("index full scan was not classified: %+v", flags)
+	}
+	flags = classifyPlan("PLAN SORT (T NATURAL)")
+	if !flags.sort || !flags.natural || flags.indexFull {
+		t.Fatalf("classic plan was not classified: %+v", flags)
+	}
+	if flags := classifyPlan(`PLAN ("NATURAL" INDEX ("SORT_QUEUE"))`); flags.natural || flags.sort {
+		t.Fatalf("quoted object name mistaken for an operator: %+v", flags)
+	}
+	left := normalizePlan("Select Expression\r\n    -> Filter  \r\n        -> Index \"IDX\" Full Scan")
+	right := normalizePlan("Select Expression\n        -> Filter\n    -> Index \"IDX\" Full Scan")
+	if left == right || left != normalizePlan("Select Expression\n    -> Filter\n        -> Index \"IDX\" Full Scan") {
+		t.Fatal("plan hierarchy or line-ending normalization lost")
+	}
+}
+
+func TestRepeatGroupsKeepPerformanceAndNestedParent(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	defer tp.Shutdown(context.Background())
+	s, err := NewSpans(SpanConfig{TracerProvider: tp, CollapseFastRepeats: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, parent := tp.Tracer("application").Start(context.Background(), "client")
+	defer parent.End()
+	anchor := time.Date(2026, 10, 3, 8, 0, 0, 0, time.UTC)
+	stamp := func(ms int) string {
+		return anchor.Add(time.Duration(ms) * time.Millisecond).Format("2006-01-02T15:04:05.999999999")
+	}
+	node := func(seq, parentSeq uint64, kind, name string, at int) *serverNode {
+		start := Event{Sequence: seq, ParentSequence: parentSeq, Kind: kind, Name: name, Timestamp: stamp(at)}
+		finish := start
+		finish.Timestamp = stamp(at + 1)
+		return &serverNode{start: start, finish: finish, complete: true}
+	}
+	root := node(1, 0, "statement", "SELECT", 0)
+	root.finish.Timestamp = stamp(10)
+	nested := node(2, 1, "procedure", "OUTER", 1)
+	nested.finish.Timestamp = stamp(9)
+	tree := &serverTree{scope: scope{parent: parent.SpanContext(), registered: anchor}, anchor: anchor,
+		nodes: []*serverNode{root, nested, node(3, 2, "procedure", "LOOKUP", 2), node(4, 2, "procedure", "LOOKUP", 3), node(5, 2, "procedure", "LOOKUP", 4), node(6, 2, "procedure", "LOOKUP", 5)}}
+	tree.nodes[5].finish.Reads = 1
+	s.exportTree(tree)
+	spans := recorder.Ended()
+	if len(spans) != 3 {
+		t.Fatalf("got %d spans, want root, parent and measured call", len(spans))
+	}
+	if len(spans[0].Events()) != 0 || len(spans[1].Events()) != 1 || spans[1].Events()[0].Name != "firebird.server.repeated_procedure" {
+		t.Fatalf("summary not attached to nested parent: %+v", spans)
+	}
+	if spans[1].Events()[0].Time.After(spans[1].EndTime()) || spans[1].Events()[0].Time.Before(spans[1].StartTime()) {
+		t.Fatal("summary event outside parent span")
+	}
+	if attributeMap(spans[2].Attributes())["firebird.pages.read"].AsInt64() != 1 {
+		t.Fatal("performance counters were collapsed")
+	}
+	tree.omitted = true
+	if collapsed, _ := s.repeatedLeaves(tree); len(collapsed) != 0 {
+		t.Fatal("truncated tree collapsed calls")
+	}
+}
+
+func TestRepeatGroupSelectionStableAcrossParents(t *testing.T) {
+	s := &SpanRuntime{c: SpanConfig{CollapseFastRepeats: true}}
+	stamp := "2026-10-03T08:00:00.000000000"
+	root := &serverNode{start: Event{Sequence: 1, Kind: "statement", Timestamp: stamp}, finish: Event{Timestamp: stamp}, complete: true}
+	tree := &serverTree{nodes: []*serverNode{root}}
+	for parent := uint64(2); parent <= 11; parent++ {
+		p := &serverNode{start: Event{Sequence: parent, ParentSequence: 1, Kind: "procedure", Timestamp: stamp}, finish: Event{Timestamp: stamp}, complete: true}
+		tree.nodes = append(tree.nodes, p)
+		for i := uint64(0); i < 3; i++ {
+			seq := parent*10 + i + 100
+			tree.nodes = append(tree.nodes, &serverNode{start: Event{Sequence: seq, ParentSequence: parent, Kind: "procedure", Name: "LOOKUP", Timestamp: stamp}, finish: Event{Timestamp: stamp}, complete: true})
+		}
+	}
+	for i := 0; i < 20; i++ {
+		_, groups := s.repeatedLeaves(tree)
+		if len(groups) != 8 || groups[0].parent != 2 || groups[7].parent != 9 {
+			t.Fatalf("unstable repeat selection: %+v", groups)
+		}
 	}
 }
 

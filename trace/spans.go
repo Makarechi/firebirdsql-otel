@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -559,14 +560,14 @@ func (s *SpanRuntime) exportTree(tree *serverTree) {
 			if plan != "" {
 				parts := planParts(plan)
 				attrs = append(attrs, attribute.String("firebird.query.plan", parts[0]))
-				sum := sha256.Sum256([]byte(strings.Join(strings.Fields(plan), " ")))
-				upper := strings.ToUpper(plan)
+				sum := sha256.Sum256([]byte(normalizePlan(plan)))
+				flags := classifyPlan(plan)
 				attrs = append(attrs,
 					attribute.String("firebird.query.plan.fingerprint", hex.EncodeToString(sum[:12])),
-					attribute.Bool("firebird.query.plan.has_sort", strings.Contains(upper, "SORT")),
-					attribute.Bool("firebird.query.plan.has_natural_scan", strings.Contains(upper, "NATURAL") || strings.Contains(upper, "TABLE FULL SCAN")),
-					attribute.Bool("firebird.query.plan.has_index_range_scan", strings.Contains(upper, "RANGE SCAN")),
-					attribute.Bool("firebird.query.plan.has_index_full_scan", strings.Contains(upper, "INDEX") && strings.Contains(upper, "FULL SCAN")),
+					attribute.Bool("firebird.query.plan.has_sort", flags.sort),
+					attribute.Bool("firebird.query.plan.has_natural_scan", flags.natural),
+					attribute.Bool("firebird.query.plan.has_index_range_scan", flags.indexRange),
+					attribute.Bool("firebird.query.plan.has_index_full_scan", flags.indexFull),
 				)
 				if len(parts) > 1 {
 					attrs = append(attrs, attribute.Int("firebird.query.plan.parts", len(parts)))
@@ -595,15 +596,15 @@ func (s *SpanRuntime) exportTree(tree *serverTree) {
 		_, span := s.tracer.Start(ctx, name, otrace.WithSpanKind(otrace.SpanKindInternal), otrace.WithTimestamp(localAnchor.Add(start.Sub(tree.anchor))), otrace.WithAttributes(attrs...))
 		exported++
 		parents[n.start.Sequence] = span.SpanContext()
-		if n == tree.nodes[0] {
-			for _, group := range repeated {
+		for _, group := range repeated {
+			if group.parent == n.start.Sequence {
 				span.AddEvent("firebird.server.repeated_procedure", otrace.WithAttributes(
 					attribute.String("db.stored_procedure.name", group.name),
 					attribute.Int64("parent_sequence", int64(group.parent)),
 					attribute.Int("call_count", group.count),
 					attribute.Float64("total_ms", group.totalMS),
 					attribute.Float64("max_ms", group.maxMS),
-				))
+				), otrace.WithTimestamp(localAnchor.Add(end.Sub(tree.anchor))))
 			}
 		}
 		for _, table := range n.finish.Tables {
@@ -625,7 +626,7 @@ type repeatedGroup struct {
 // call and every child-bearing procedure visible as an individual span.
 func (s *SpanRuntime) repeatedLeaves(tree *serverTree) (map[uint64]bool, []repeatedGroup) {
 	collapsed := make(map[uint64]bool)
-	if !s.c.CollapseFastRepeats || len(tree.nodes) < 4 {
+	if !s.c.CollapseFastRepeats || tree.omitted || len(tree.nodes) < 4 {
 		return collapsed, nil
 	}
 	hasChildren := make(map[uint64]bool)
@@ -638,7 +639,8 @@ func (s *SpanRuntime) repeatedLeaves(tree *serverTree) (map[uint64]bool, []repea
 	}
 	groups := make(map[groupKey]*repeatedGroup)
 	for _, n := range tree.nodes[1:] {
-		if !n.complete || n.start.Kind != "procedure" || hasChildren[n.start.Sequence] {
+		if !n.complete || n.start.Kind != "procedure" || hasChildren[n.start.Sequence] ||
+			n.finish.Reads != 0 || n.finish.Writes != 0 || n.finish.Fetches != 0 || n.finish.Marks != 0 || len(n.finish.Tables) != 0 {
 			continue
 		}
 		durationMS := float64(n.finish.DurationMS)
@@ -670,6 +672,9 @@ func (s *SpanRuntime) repeatedLeaves(tree *serverTree) (map[uint64]bool, []repea
 	}
 	sort.Slice(selected, func(i, j int) bool {
 		if selected[i].count == selected[j].count {
+			if selected[i].name == selected[j].name {
+				return selected[i].parent < selected[j].parent
+			}
 			return selected[i].name < selected[j].name
 		}
 		return selected[i].count > selected[j].count
@@ -683,6 +688,49 @@ func (s *SpanRuntime) repeatedLeaves(tree *serverTree) (map[uint64]bool, []repea
 		}
 	}
 	return collapsed, selected
+}
+
+// Keep record-source nesting in explained plans while ignoring line-ending and
+// trailing-space differences. Classic one-line plans have no hierarchy.
+func normalizePlan(plan string) string {
+	plan = strings.ReplaceAll(strings.ReplaceAll(plan, "\r\n", "\n"), "\r", "\n")
+	lines := strings.Split(strings.Trim(plan, "\n"), "\n")
+	for i := range lines {
+		lines[i] = strings.TrimRight(lines[i], " \t")
+	}
+	if len(lines) == 1 {
+		return strings.Join(strings.Fields(lines[0]), " ")
+	}
+	return strings.Join(lines, "\n")
+}
+
+type planFlags struct{ sort, natural, indexRange, indexFull bool }
+
+var (
+	classicSort          = regexp.MustCompile(`(?i)\bPLAN\s+SORT\b`)
+	classicNatural       = regexp.MustCompile(`(?i)\bNATURAL\b`)
+	quotedPlanIdentifier = regexp.MustCompile(`"(?:""|[^"])*"`)
+	explainedSort        = regexp.MustCompile(`(?i)^\s*->\s*Sort(?:\s|$)`)
+	explainedTableFull   = regexp.MustCompile(`(?i)^\s*->\s*Table\s+.+\s+Full Scan(?:\s|$)`)
+	explainedIndexRange  = regexp.MustCompile(`(?i)^\s*->\s*Index\s+.+\s+Range Scan(?:\s|$)`)
+	explainedIndexFull   = regexp.MustCompile(`(?i)^\s*->\s*Index\s+.+\s+Full Scan(?:\s|$)`)
+)
+
+func classifyPlan(plan string) planFlags {
+	var flags planFlags
+	if !strings.Contains(plan, "->") {
+		operators := quotedPlanIdentifier.ReplaceAllString(plan, "")
+		flags.sort = classicSort.MatchString(operators)
+		flags.natural = classicNatural.MatchString(operators)
+		return flags
+	}
+	for _, line := range strings.Split(plan, "\n") {
+		flags.sort = flags.sort || explainedSort.MatchString(line)
+		flags.natural = flags.natural || explainedTableFull.MatchString(line)
+		flags.indexRange = flags.indexRange || explainedIndexRange.MatchString(line)
+		flags.indexFull = flags.indexFull || explainedIndexFull.MatchString(line)
+	}
+	return flags
 }
 
 // The currently deployed Google Cloud Trace exporter truncates string values
