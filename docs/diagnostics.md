@@ -92,6 +92,9 @@ if err != nil { return err }
 
 cfg := firebirdotel.SafeConfig()
 cfg.ServerTrace = server
+// Client and server Trace spans remain enabled without a Profiler.
+// To add one profile for every sampled SQL call, set both fields explicitly:
+// cfg.Profiler = firebirdotel.ProfilerConfig{Enabled: true, Starter: profileRuntime}
 driverName, err := firebirdotel.RegisterWithConfig(cfg)
 if err != nil { return err }
 // Pass driverName to your existing database constructor. It still owns the pool.
@@ -267,6 +270,19 @@ connection within the supplied context. Tests cover cancellation, a bounded even
 queue and real Firebird session shutdown. There is no automatic reconnect that
 silently reconstructs an allegedly complete tree.
 
+## Per-SQL Profiler switch
+
+`Config.Profiler.Enabled` is false by default. Passing a `Starter` without
+enabling it leaves client and configured server Trace spans unchanged and does
+not run Profiler commands. Enable profiling explicitly with a `profiler.Runtime`
+from this module and `ProfilerConfig{Enabled: true, Starter: runtime}`. An
+enabled config without a starter fails during instrumentation setup. Profiling
+uses the incoming trace sampling decision: every eligible SQL call in a sampled
+trace gets one profile. It writes to the target Firebird database, so check
+read-only status, run stale-profile cleanup, and close the runtime in the
+application lifecycle. The runtime exports bounded record-source detail as
+Cloud Trace span events and deletes the stored profile after reading it.
+
 ## Manual Profiler example
 
 `go run ./examples/profiler` runs against the synthetic fixture using FIREBIRD_TEST_DSN.
@@ -278,8 +294,8 @@ row count and detailed request count, with source=profiler/correlation=scoped.
 
 Profiler's default is aggregation; detailed requests can generate substantial data.
 Autonomous flush changes snapshot visibility. PLG$ profiler tables can store raw SQL
-on the server, so use this example on synthetic data. This example is not a second
-Profiler SDK or automatic profiling of production traffic.
+on the server, so use this example on synthetic data. The manual example is
+separate from the per-SQL instrumentation above.
 
 ## Sources
 

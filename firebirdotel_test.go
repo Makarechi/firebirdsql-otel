@@ -19,6 +19,36 @@ import (
 
 var mockDriverID uint64
 
+func TestSQLDurationBucketsResolveMillisecondCosts(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	defer provider.Shutdown(context.Background())
+	config := SafeConfig()
+	config.MeterProvider = provider
+	telemetry, err := newTelemetry(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	telemetry.duration.Record(context.Background(), .02)
+	var got metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &got); err != nil {
+		t.Fatal(err)
+	}
+	for _, scope := range got.ScopeMetrics {
+		for _, value := range scope.Metrics {
+			if value.Name != "db.client.operation.duration" {
+				continue
+			}
+			points := value.Data.(metricdata.Histogram[float64]).DataPoints
+			if len(points) != 1 || len(points[0].Bounds) < 7 || points[0].Bounds[6] != .05 {
+				t.Fatalf("unexpected SQL histogram boundaries: %+v", points)
+			}
+			return
+		}
+	}
+	t.Fatal("SQL duration histogram missing")
+}
+
 func TestOpenWithDriverCreatesSpans(t *testing.T) {
 	driverName := registerMockDriver(t)
 	exporter := tracetest.NewInMemoryExporter()

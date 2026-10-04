@@ -2,6 +2,8 @@ package trace
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"testing"
@@ -282,6 +284,10 @@ func TestLargeServerTreeKeepsRootSpan(t *testing.T) {
 	if rootSpan.Name() != "SELECT VIEW" || rootSpan.Parent().SpanID() != parent.SpanContext().SpanID() || !attributeMap(rootSpan.Attributes())["firebird.incomplete"].AsBool() {
 		t.Fatal("large query lost its incomplete parent span", rootSpan)
 	}
+	attrs := attributeMap(rootSpan.Attributes())
+	if attrs["firebird.incomplete.reasons"].AsString() != "collection_limit" || attrs["firebird.server.nodes.exportable"].AsInt64() != 128 {
+		t.Fatal("bounded trace does not explain its limits", attrs)
+	}
 }
 
 func TestUnmatchedMarkerCannotCreateServerTree(t *testing.T) {
@@ -427,7 +433,200 @@ func TestServerStatementSpanExportsExecutionPlan(t *testing.T) {
 			} else if !ok || got.AsString() != tc.wantPlan {
 				t.Fatalf("plan = %q, present = %t; want %q", got.AsString(), ok, tc.wantPlan)
 			}
+			if tc.wantPlan != "" {
+				sum := sha256.Sum256([]byte(normalizePlan(tc.wantPlan)))
+				fingerprint := attributeMap(spans[0].Attributes())["firebird.query.plan.fingerprint"].AsString()
+				if fingerprint != hex.EncodeToString(sum[:12]) {
+					t.Fatalf("plan fingerprint = %s", fingerprint)
+				}
+			}
 		})
+	}
+}
+
+func TestPlanClassificationAndFingerprintRetainStructure(t *testing.T) {
+	plan := "Select Expression\n    -> Table \"SORT_QUEUE\" Full Scan\n    -> Index \"IDX\" Range Scan"
+	flags := classifyPlan(plan)
+	if flags.sort || !flags.natural || !flags.indexRange || flags.indexFull {
+		t.Fatalf("unrelated operations were combined: %+v", flags)
+	}
+	flags = classifyPlan("Select Expression\n    -> Index \"IDX\" Full Scan")
+	if !flags.indexFull || flags.natural {
+		t.Fatalf("index full scan was not classified: %+v", flags)
+	}
+	flags = classifyPlan("PLAN SORT (T NATURAL)")
+	if !flags.sort || !flags.natural || flags.indexFull {
+		t.Fatalf("classic plan was not classified: %+v", flags)
+	}
+	if flags := classifyPlan("PLAN MERGE (SORT (T NATURAL), SORT (U NATURAL))"); !flags.sort || !flags.natural {
+		t.Fatalf("nested classic sort was missed: %+v", flags)
+	}
+	if flags := classifyPlan(`PLAN ("NATURAL" INDEX ("SORT_QUEUE"))`); flags.natural || flags.sort {
+		t.Fatalf("quoted object name mistaken for an operator: %+v", flags)
+	}
+	if flags := classifyPlan(`PLAN ("A->B" NATURAL)`); !flags.natural || flags.sort {
+		t.Fatalf("quoted arrow mistaken for explained plan: %+v", flags)
+	}
+	if normalizePlan(`PLAN ("A  B" NATURAL)`) == normalizePlan(`PLAN ("A B" NATURAL)`) {
+		t.Fatal("quoted identifier whitespace disappeared from plan fingerprint")
+	}
+	if normalizePlan("PLAN   ( T\tNATURAL )") != normalizePlan("PLAN ( T NATURAL )") {
+		t.Fatal("insignificant classic-plan whitespace changed fingerprint")
+	}
+	left := normalizePlan("Select Expression\r\n    -> Filter  \r\n        -> Index \"IDX\" Full Scan")
+	right := normalizePlan("Select Expression\n        -> Filter\n    -> Index \"IDX\" Full Scan")
+	if left == right || left != normalizePlan("Select Expression\n    -> Filter\n        -> Index \"IDX\" Full Scan") {
+		t.Fatal("plan hierarchy or line-ending normalization lost")
+	}
+}
+
+func TestRepeatGroupsKeepPerformanceAndNestedParent(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	defer tp.Shutdown(context.Background())
+	s, err := NewSpans(SpanConfig{TracerProvider: tp, CollapseFastRepeats: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, parent := tp.Tracer("application").Start(context.Background(), "client")
+	defer parent.End()
+	anchor := time.Date(2026, 10, 3, 8, 0, 0, 0, time.UTC)
+	stamp := func(ms int) string {
+		return anchor.Add(time.Duration(ms) * time.Millisecond).Format("2006-01-02T15:04:05.999999999")
+	}
+	node := func(seq, parentSeq uint64, kind, name string, at int) *serverNode {
+		start := Event{Sequence: seq, ParentSequence: parentSeq, Kind: kind, Name: name, Timestamp: stamp(at)}
+		finish := start
+		finish.Timestamp = stamp(at + 1)
+		return &serverNode{start: start, finish: finish, complete: true}
+	}
+	root := node(1, 0, "statement", "SELECT", 0)
+	root.finish.Timestamp = stamp(10)
+	nested := node(2, 1, "procedure", "OUTER", 1)
+	nested.finish.Timestamp = stamp(9)
+	tree := &serverTree{scope: scope{parent: parent.SpanContext(), registered: anchor}, anchor: anchor,
+		nodes: []*serverNode{root, nested, node(3, 2, "procedure", "LOOKUP", 2), node(4, 2, "procedure", "LOOKUP", 3), node(5, 2, "procedure", "LOOKUP", 4), node(6, 2, "procedure", "LOOKUP", 5)}}
+	tree.nodes[5].finish.Reads = 1
+	s.exportTree(tree)
+	spans := recorder.Ended()
+	if len(spans) != 3 {
+		t.Fatalf("got %d spans, want root, parent and measured call", len(spans))
+	}
+	if len(spans[0].Events()) != 0 || len(spans[1].Events()) != 1 || spans[1].Events()[0].Name != "firebird.server.repeated_procedure" {
+		t.Fatalf("summary not attached to nested parent: %+v", spans)
+	}
+	if spans[1].Events()[0].Time.After(spans[1].EndTime()) || spans[1].Events()[0].Time.Before(spans[1].StartTime()) {
+		t.Fatal("summary event outside parent span")
+	}
+	if attributeMap(spans[2].Attributes())["firebird.pages.read"].AsInt64() != 1 {
+		t.Fatal("performance counters were collapsed")
+	}
+	tree.omitted = true
+	if collapsed, _ := s.repeatedLeaves(tree); len(collapsed) != 0 {
+		t.Fatal("truncated tree collapsed calls")
+	}
+}
+
+func TestRepeatGroupSelectionStableAcrossParents(t *testing.T) {
+	s := &SpanRuntime{c: SpanConfig{CollapseFastRepeats: true}}
+	stamp := "2026-10-03T08:00:00.000000000"
+	root := &serverNode{start: Event{Sequence: 1, Kind: "statement", Timestamp: stamp}, finish: Event{Timestamp: stamp}, complete: true}
+	tree := &serverTree{nodes: []*serverNode{root}}
+	for parent := uint64(2); parent <= 11; parent++ {
+		p := &serverNode{start: Event{Sequence: parent, ParentSequence: 1, Kind: "procedure", Timestamp: stamp}, finish: Event{Timestamp: stamp}, complete: true}
+		tree.nodes = append(tree.nodes, p)
+		for i := uint64(0); i < 3; i++ {
+			seq := parent*10 + i + 100
+			tree.nodes = append(tree.nodes, &serverNode{start: Event{Sequence: seq, ParentSequence: parent, Kind: "procedure", Name: "LOOKUP", Timestamp: stamp}, finish: Event{Timestamp: stamp}, complete: true})
+		}
+	}
+	for i := 0; i < 20; i++ {
+		_, groups := s.repeatedLeaves(tree)
+		if len(groups) != 8 || groups[0].parent != 2 || groups[7].parent != 9 {
+			t.Fatalf("unstable repeat selection: %+v", groups)
+		}
+	}
+}
+
+func TestCompactServerTreeRetainsSlowAndNestedCalls(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	defer tp.Shutdown(context.Background())
+	s, err := NewSpans(SpanConfig{TracerProvider: tp, CollapseFastRepeats: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, parent := tp.Tracer("application").Start(context.Background(), "client")
+	defer parent.End()
+	anchor := time.Date(2026, 10, 3, 8, 0, 0, 0, time.UTC)
+	stamp := func(ms int) string {
+		return anchor.Add(time.Duration(ms) * time.Millisecond).Format("2006-01-02T15:04:05.999999999")
+	}
+	node := func(seq, parentSeq uint64, kind, name string, startMS, endMS int) *serverNode {
+		start := Event{Sequence: seq, ParentSequence: parentSeq, Kind: kind, Name: name, Timestamp: stamp(startMS)}
+		finish := start
+		finish.Timestamp = stamp(endMS)
+		finish.DurationMS = int64(endMS - startMS)
+		return &serverNode{start: start, finish: finish, complete: true}
+	}
+	tree := &serverTree{scope: scope{parent: parent.SpanContext(), registered: anchor}, anchor: anchor, nodes: []*serverNode{
+		node(1, 0, "statement", "SELECT T", 0, 10),
+		node(2, 1, "procedure", "LOOKUP", 1, 1),
+		node(3, 1, "procedure", "LOOKUP", 2, 2),
+		node(4, 1, "procedure", "LOOKUP", 3, 3),
+		node(5, 1, "procedure", "LOOKUP", 4, 8),
+		node(6, 1, "procedure", "NESTED", 5, 6),
+		node(7, 6, "procedure", "CHILD", 5, 5),
+	}}
+	s.exportTree(tree)
+	spans := recorder.Ended()
+	if len(spans) != 4 {
+		t.Fatalf("got %d spans, want root, slow lookup, nested parent and child", len(spans))
+	}
+	rootAttrs := attributeMap(spans[0].Attributes())
+	if rootAttrs["firebird.server.repeated_calls.collapsed"].AsInt64() != 3 || len(spans[0].Events()) != 1 {
+		t.Fatalf("repeat summary missing: attrs=%v events=%v", rootAttrs, spans[0].Events())
+	}
+	if attributeMap(spans[0].Events()[0].Attributes)["call_count"].AsInt64() != 3 {
+		t.Fatal("wrong repeated call count")
+	}
+	if spans[1].Name() != "LOOKUP" || spans[2].Name() != "NESTED" || spans[3].Name() != "CHILD" {
+		t.Fatalf("slow or nested detail missing: %s, %s, %s", spans[1].Name(), spans[2].Name(), spans[3].Name())
+	}
+}
+
+func TestCompactServerTreeCountsLargeRepeatGroup(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	defer tp.Shutdown(context.Background())
+	s, err := NewSpans(SpanConfig{TracerProvider: tp, CollapseFastRepeats: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, parent := tp.Tracer("application").Start(context.Background(), "client")
+	defer parent.End()
+	anchor := time.Date(2026, 10, 3, 8, 0, 0, 0, time.UTC)
+	stamp := anchor.Format("2006-01-02T15:04:05.999999999")
+	root := &serverNode{start: Event{Kind: "statement", Name: "SELECT T", Sequence: 1, Timestamp: stamp}, finish: Event{Kind: "statement", Sequence: 1, Timestamp: stamp}, complete: true}
+	tree := &serverTree{scope: scope{parent: parent.SpanContext(), registered: anchor}, anchor: anchor, nodes: []*serverNode{root}}
+	for i := uint64(2); i <= 366; i++ {
+		start := Event{Kind: "procedure", Name: "LOOKUP", Sequence: i, ParentSequence: 1, Timestamp: stamp, Incomplete: true}
+		tree.nodes = append(tree.nodes, &serverNode{start: start, finish: Event{Timestamp: stamp, Incomplete: true}, complete: true})
+	}
+	s.exportTree(tree)
+	spans := recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("got %d spans, want one summarized statement", len(spans))
+	}
+	attrs := attributeMap(spans[0].Attributes())
+	if attrs["firebird.server.repeated_calls.collapsed"].AsInt64() != 365 {
+		t.Fatal("lost repeat count", attrs)
+	}
+	if !attrs["firebird.incomplete"].AsBool() {
+		t.Fatal("partial repeat detail lost its incomplete marker")
+	}
+	if attrs["firebird.incomplete.reasons"].AsString() != "source_event" || attrs["firebird.server.nodes.collected"].AsInt64() != 366 || attrs["firebird.server.nodes.exportable"].AsInt64() != 1 {
+		t.Fatal("repeat trace does not explain its incompleteness", attrs)
 	}
 }
 

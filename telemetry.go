@@ -46,7 +46,10 @@ func newTelemetry(c Config) (*telemetry, error) {
 	if mp == nil {
 		mp = otel.GetMeterProvider()
 	}
-	h, err := mp.Meter(instrumentationName).Float64Histogram("db.client.operation.duration", metric.WithUnit("s"))
+	h, err := mp.Meter(instrumentationName).Float64Histogram("db.client.operation.duration",
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(.0005, .001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10),
+	)
 	if err != nil {
 		return nil, ErrInstrumentation
 	}

@@ -3,9 +3,12 @@ package trace
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +28,8 @@ type SpanConfig struct {
 	MeterProvider  metric.MeterProvider
 	MaxPending     int
 	Retention      time.Duration
+	// CollapseFastRepeats groups repeated leaf procedures lasting at most 2 ms.
+	CollapseFastRepeats bool
 }
 
 type scope struct {
@@ -425,7 +430,11 @@ func (s *SpanRuntime) consume(r *Runtime) {
 					drop(tree, "overflow")
 					continue
 				}
-				if len(tree.nodes) >= 128 {
+				maxNodes := 128
+				if s.c.CollapseFastRepeats {
+					maxNodes = 512
+				}
+				if len(tree.nodes) >= maxNodes {
 					// Keep following active sequences for correlation, but retain only
 					// a bounded prefix of child spans. The root must still be exported.
 					tree.omitted = true
@@ -465,13 +474,43 @@ func (s *SpanRuntime) consume(r *Runtime) {
 }
 
 func (s *SpanRuntime) exportTree(tree *serverTree) {
-	incomplete := tree.omitted
+	sourceEvent, unpaired := false, false
 	for _, n := range tree.nodes {
-		incomplete = incomplete || !n.complete || n.start.Incomplete || n.finish.Incomplete
+		sourceEvent = sourceEvent || n.start.Incomplete || n.finish.Incomplete
+		unpaired = unpaired || !n.complete
+	}
+	collapsed, repeated := s.repeatedLeaves(tree)
+	visible := 0
+	for _, n := range tree.nodes {
+		if n.complete && !collapsed[n.start.Sequence] {
+			visible++
+		}
+	}
+	exportLimit := visible > 128
+	incomplete := sourceEvent || unpaired || tree.omitted || exportLimit
+	reasons := make([]string, 0, 4)
+	if sourceEvent {
+		reasons = append(reasons, "source_event")
+	}
+	if unpaired {
+		reasons = append(reasons, "unpaired")
+	}
+	if tree.omitted {
+		reasons = append(reasons, "collection_limit")
+	}
+	if exportLimit {
+		reasons = append(reasons, "export_limit")
 	}
 	parents := make(map[uint64]otrace.SpanContext)
+	exported := 0
 	for _, n := range tree.nodes {
 		if !n.complete {
+			continue
+		}
+		if collapsed[n.start.Sequence] {
+			continue
+		}
+		if exported >= 128 {
 			continue
 		}
 		start, err := time.Parse("2006-01-02T15:04:05.999999999", n.start.Timestamp)
@@ -496,6 +535,17 @@ func (s *SpanRuntime) exportTree(tree *serverTree) {
 			attribute.Int64("firebird.pages.read", n.finish.Reads), attribute.Int64("firebird.pages.write", n.finish.Writes),
 			attribute.Int64("firebird.pages.fetch", n.finish.Fetches), attribute.Int64("firebird.pages.mark", n.finish.Marks),
 		}
+		if n == tree.nodes[0] {
+			attrs = append(attrs,
+				attribute.String("firebird.incomplete.reasons", strings.Join(reasons, ",")),
+				attribute.Int("firebird.server.nodes.collected", len(tree.nodes)),
+				attribute.Int("firebird.server.nodes.exportable", visible),
+			)
+		}
+		if n == tree.nodes[0] && len(collapsed) > 0 {
+			attrs = append(attrs, attribute.Int("firebird.server.repeated_calls.collapsed", len(collapsed)),
+				attribute.Int("firebird.server.repeated_groups", len(repeated)))
+		}
 		if n.start.Kind == "procedure" {
 			attrs = append(attrs, attribute.String("db.stored_procedure.name", n.start.Name))
 		}
@@ -510,6 +560,15 @@ func (s *SpanRuntime) exportTree(tree *serverTree) {
 			if plan != "" {
 				parts := planParts(plan)
 				attrs = append(attrs, attribute.String("firebird.query.plan", parts[0]))
+				sum := sha256.Sum256([]byte(normalizePlan(plan)))
+				flags := classifyPlan(plan)
+				attrs = append(attrs,
+					attribute.String("firebird.query.plan.fingerprint", hex.EncodeToString(sum[:12])),
+					attribute.Bool("firebird.query.plan.has_sort", flags.sort),
+					attribute.Bool("firebird.query.plan.has_natural_scan", flags.natural),
+					attribute.Bool("firebird.query.plan.has_index_range_scan", flags.indexRange),
+					attribute.Bool("firebird.query.plan.has_index_full_scan", flags.indexFull),
+				)
 				if len(parts) > 1 {
 					attrs = append(attrs, attribute.Int("firebird.query.plan.parts", len(parts)))
 					for i := 1; i < len(parts); i++ {
@@ -535,12 +594,169 @@ func (s *SpanRuntime) exportTree(tree *serverTree) {
 			localAnchor = tree.scope.registered
 		}
 		_, span := s.tracer.Start(ctx, name, otrace.WithSpanKind(otrace.SpanKindInternal), otrace.WithTimestamp(localAnchor.Add(start.Sub(tree.anchor))), otrace.WithAttributes(attrs...))
+		exported++
 		parents[n.start.Sequence] = span.SpanContext()
+		for _, group := range repeated {
+			if group.parent == n.start.Sequence {
+				span.AddEvent("firebird.server.repeated_procedure", otrace.WithAttributes(
+					attribute.String("db.stored_procedure.name", group.name),
+					attribute.Int64("parent_sequence", int64(group.parent)),
+					attribute.Int("call_count", group.count),
+					attribute.Float64("total_ms", group.totalMS),
+					attribute.Float64("max_ms", group.maxMS),
+				), otrace.WithTimestamp(localAnchor.Add(end.Sub(tree.anchor))))
+			}
+		}
 		for _, table := range n.finish.Tables {
 			span.AddEvent("firebird.table", otrace.WithTimestamp(localAnchor.Add(end.Sub(tree.anchor))), otrace.WithAttributes(attribute.String("db.collection.name", table.Name), attribute.Int64("firebird.rows.read.natural", table.Natural), attribute.Int64("firebird.rows.read.index", table.Index), attribute.Int64("firebird.rows.updated", table.Update), attribute.Int64("firebird.rows.inserted", table.Insert), attribute.Int64("firebird.rows.deleted", table.Delete), attribute.Int64("firebird.rows.backout", table.Backout), attribute.Int64("firebird.rows.purge", table.Purge), attribute.Int64("firebird.rows.expunge", table.Expunge)))
 		}
 		span.End(otrace.WithTimestamp(localAnchor.Add(end.Sub(tree.anchor))))
 	}
+}
+
+type repeatedGroup struct {
+	name           string
+	parent         uint64
+	count          int
+	totalMS, maxMS float64
+	sequences      []uint64
+}
+
+// Collapse only complete leaf procedures with the same parent. Keep every slow
+// call and every child-bearing procedure visible as an individual span.
+func (s *SpanRuntime) repeatedLeaves(tree *serverTree) (map[uint64]bool, []repeatedGroup) {
+	collapsed := make(map[uint64]bool)
+	if !s.c.CollapseFastRepeats || tree.omitted || len(tree.nodes) < 4 {
+		return collapsed, nil
+	}
+	hasChildren := make(map[uint64]bool)
+	for _, n := range tree.nodes {
+		hasChildren[n.start.ParentSequence] = true
+	}
+	type groupKey struct {
+		parent uint64
+		name   string
+	}
+	groups := make(map[groupKey]*repeatedGroup)
+	for _, n := range tree.nodes[1:] {
+		if !n.complete || n.start.Kind != "procedure" || hasChildren[n.start.Sequence] ||
+			n.finish.Reads != 0 || n.finish.Writes != 0 || n.finish.Fetches != 0 || n.finish.Marks != 0 || len(n.finish.Tables) != 0 {
+			continue
+		}
+		durationMS := float64(n.finish.DurationMS)
+		start, startErr := time.Parse("2006-01-02T15:04:05.999999999", n.start.Timestamp)
+		end, endErr := time.Parse("2006-01-02T15:04:05.999999999", n.finish.Timestamp)
+		if startErr != nil || endErr != nil || end.Before(start) {
+			continue
+		}
+		durationMS = max(durationMS, float64(end.Sub(start))/float64(time.Millisecond))
+		if durationMS > 2 {
+			continue
+		}
+		key := groupKey{n.start.ParentSequence, n.start.Name}
+		g := groups[key]
+		if g == nil {
+			g = &repeatedGroup{name: key.name, parent: key.parent}
+			groups[key] = g
+		}
+		g.count++
+		g.totalMS += durationMS
+		g.maxMS = max(g.maxMS, durationMS)
+		g.sequences = append(g.sequences, n.start.Sequence)
+	}
+	selected := make([]repeatedGroup, 0, len(groups))
+	for _, g := range groups {
+		if g.count >= 3 {
+			selected = append(selected, *g)
+		}
+	}
+	sort.Slice(selected, func(i, j int) bool {
+		if selected[i].count == selected[j].count {
+			if selected[i].name == selected[j].name {
+				return selected[i].parent < selected[j].parent
+			}
+			return selected[i].name < selected[j].name
+		}
+		return selected[i].count > selected[j].count
+	})
+	if len(selected) > 8 {
+		selected = selected[:8]
+	}
+	for _, g := range selected {
+		for _, sequence := range g.sequences {
+			collapsed[sequence] = true
+		}
+	}
+	return collapsed, selected
+}
+
+// Keep record-source nesting in explained plans while ignoring line-ending and
+// trailing-space differences. Classic one-line plans have no hierarchy.
+func normalizePlan(plan string) string {
+	plan = strings.ReplaceAll(strings.ReplaceAll(plan, "\r\n", "\n"), "\r", "\n")
+	lines := strings.Split(strings.Trim(plan, "\n"), "\n")
+	for i := range lines {
+		lines[i] = strings.TrimRight(lines[i], " \t")
+	}
+	if len(lines) == 1 {
+		return normalizeClassicPlan(lines[0])
+	}
+	return strings.Join(lines, "\n")
+}
+
+func normalizeClassicPlan(plan string) string {
+	var normalized strings.Builder
+	quoted, space := false, false
+	for _, char := range plan {
+		if char == '"' {
+			if space && normalized.Len() > 0 {
+				normalized.WriteByte(' ')
+			}
+			space = false
+			quoted = !quoted
+			normalized.WriteRune(char)
+			continue
+		}
+		if !quoted && (char == ' ' || char == '\t') {
+			space = true
+			continue
+		}
+		if space && normalized.Len() > 0 {
+			normalized.WriteByte(' ')
+		}
+		space = false
+		normalized.WriteRune(char)
+	}
+	return normalized.String()
+}
+
+type planFlags struct{ sort, natural, indexRange, indexFull bool }
+
+var (
+	classicSort          = regexp.MustCompile(`(?i)\bSORT\s*\(`)
+	classicNatural       = regexp.MustCompile(`(?i)\bNATURAL\b`)
+	quotedPlanIdentifier = regexp.MustCompile(`"(?:""|[^"])*"`)
+	explainedSort        = regexp.MustCompile(`(?i)^\s*->\s*Sort(?:\s|$)`)
+	explainedTableFull   = regexp.MustCompile(`(?i)^\s*->\s*Table\s+.+\s+Full Scan(?:\s|$)`)
+	explainedIndexRange  = regexp.MustCompile(`(?i)^\s*->\s*Index\s+.+\s+Range Scan(?:\s|$)`)
+	explainedIndexFull   = regexp.MustCompile(`(?i)^\s*->\s*Index\s+.+\s+Full Scan(?:\s|$)`)
+)
+
+func classifyPlan(plan string) planFlags {
+	var flags planFlags
+	operators := quotedPlanIdentifier.ReplaceAllString(plan, "")
+	if !strings.Contains(operators, "->") {
+		flags.sort = classicSort.MatchString(operators)
+		flags.natural = classicNatural.MatchString(operators)
+		return flags
+	}
+	for _, line := range strings.Split(plan, "\n") {
+		flags.sort = flags.sort || explainedSort.MatchString(line)
+		flags.natural = flags.natural || explainedTableFull.MatchString(line)
+		flags.indexRange = flags.indexRange || explainedIndexRange.MatchString(line)
+		flags.indexFull = flags.indexFull || explainedIndexFull.MatchString(line)
+	}
+	return flags
 }
 
 // The currently deployed Google Cloud Trace exporter truncates string values

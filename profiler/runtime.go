@@ -20,18 +20,25 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
 
 const maxSources = 64
+const topSources = 5
 const cleanupTimeout = 5 * time.Second
 
 var poolName = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
 
 type Runtime struct {
-	db     *sql.DB
-	name   string
-	tracer trace.Tracer
+	db             *sql.DB
+	name           string
+	tracer         trace.Tracer
+	stageDuration  metric.Float64Histogram
+	stageCalls     metric.Int64Counter
+	staleRemoved   metric.Int64Counter
+	staleRemaining metric.Int64Gauge
+	meterProvider  metric.MeterProvider
 }
 
 type Option func(*Runtime)
@@ -41,6 +48,57 @@ func WithTracerProvider(provider trace.TracerProvider) Option {
 		if provider != nil {
 			r.tracer = provider.Tracer("github.com/Makarechi/firebirdsql-otel/profiler")
 		}
+	}
+}
+
+// WithMeterProvider directs bounded, low-cardinality profiler metrics to a
+// service's meter provider. The default is the global provider.
+func WithMeterProvider(provider metric.MeterProvider) Option {
+	return func(r *Runtime) {
+		if provider != nil {
+			r.meterProvider = provider
+		}
+	}
+}
+
+func (r *Runtime) initMetrics(provider metric.MeterProvider) error {
+	meter := provider.Meter("github.com/Makarechi/firebirdsql-otel/profiler")
+	var err error
+	r.stageDuration, err = meter.Float64Histogram("firebird.profiler.stage.duration",
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(.001, .002, .005, .01, .02, .05, .1, .2, .5, 1, 2, 5),
+	)
+	if err != nil {
+		return errors.New("profiler: metric initialization failed")
+	}
+	r.stageCalls, err = meter.Int64Counter("firebird.profiler.stage.calls")
+	if err != nil {
+		return errors.New("profiler: metric initialization failed")
+	}
+	r.staleRemoved, err = meter.Int64Counter("firebird.profiler.stale.removed")
+	if err != nil {
+		return errors.New("profiler: metric initialization failed")
+	}
+	r.staleRemaining, err = meter.Int64Gauge("firebird.profiler.stale.remaining")
+	if err != nil {
+		return errors.New("profiler: metric initialization failed")
+	}
+	return nil
+}
+
+func (r *Runtime) recordStage(stage string, elapsed time.Duration, err error) {
+	attrs := []attribute.KeyValue{attribute.String("pool", r.name), attribute.String("stage", stage)}
+	if err != nil {
+		attrs = append(attrs, attribute.String("outcome", "error"))
+	} else {
+		attrs = append(attrs, attribute.String("outcome", "ok"))
+	}
+	ctx := context.Background()
+	if r.stageDuration != nil {
+		r.stageDuration.Record(ctx, elapsed.Seconds(), metric.WithAttributes(attrs...))
+	}
+	if r.stageCalls != nil {
+		r.stageCalls.Add(ctx, 1, metric.WithAttributes(attrs...))
 	}
 }
 
@@ -66,10 +124,15 @@ func New(dsn, name string, options ...Option) (*Runtime, error) {
 	db.SetMaxOpenConns(2)
 	db.SetMaxIdleConns(1)
 	r := &Runtime{db: db, name: name, tracer: otel.Tracer("github.com/Makarechi/firebirdsql-otel/profiler")}
+	r.meterProvider = otel.GetMeterProvider()
 	for _, option := range options {
 		if option != nil {
 			option(r)
 		}
+	}
+	if err := r.initMetrics(r.meterProvider); err != nil {
+		_ = db.Close()
+		return nil, err
 	}
 	return r, nil
 }
@@ -92,11 +155,12 @@ func (r *Runtime) CheckSupported(ctx context.Context) error {
 var ErrReadOnlyDatabase = errors.New("profiler: database is read-only; profile storage is unavailable")
 
 type Session struct {
-	runtime *Runtime
-	conn    driver.Conn
-	span    trace.Span
-	id      int64
-	done    bool
+	runtime  *Runtime
+	conn     driver.Conn
+	span     trace.Span
+	id       int64
+	done     bool
+	overhead time.Duration
 }
 
 // Start is called on the physical connection immediately before business SQL.
@@ -109,18 +173,24 @@ func (r *Runtime) Start(ctx context.Context, conn driver.Conn, parent trace.Span
 		trace.WithAttributes(attribute.String("firebird.source", "profiler"), attribute.String("db.connection.name", r.name)))
 	description := "firebirdotel/" + r.name + "/" + parent.TraceID().String()
 	query := "SELECT RDB$PROFILER.START_SESSION('" + description + "') FROM RDB$DATABASE"
+	started := time.Now()
 	id, err := queryInt64(ctx, conn, query)
+	startDuration := time.Since(started)
+	r.recordStage("start", startDuration, err)
+	span.SetAttributes(attribute.Float64("firebird.profiler.start_ms", float64(startDuration)/float64(time.Millisecond)))
 	if err != nil {
 		// A lost response can leave a started session on this connection.
 		cleanup, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+		started = time.Now()
 		_, cancelErr := exec(cleanup, conn, "EXECUTE PROCEDURE RDB$PROFILER.CANCEL_SESSION")
+		r.recordStage("cancel", time.Since(started), cancelErr)
 		cancel()
 		span.SetStatus(codes.Error, "start_failed")
 		span.End()
 		return nil, errors.Join(err, cancelErr)
 	}
 	span.SetAttributes(attribute.Int64("firebird.profiler.profile_id", id))
-	return &Session{runtime: r, conn: conn, span: span, id: id}, nil
+	return &Session{runtime: r, conn: conn, span: span, id: id, overhead: startDuration}, nil
 }
 
 func (s *Session) Finish(client trace.SpanContext) error {
@@ -133,34 +203,67 @@ func (s *Session) Finish(client trace.SpanContext) error {
 		s.span.SetAttributes(attribute.String("firebird.profiler.client_span_id", client.SpanID().String()))
 	}
 	finishCtx, finishCancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	started := time.Now()
 	_, finishErr := exec(finishCtx, s.conn, "EXECUTE PROCEDURE RDB$PROFILER.FINISH_SESSION(TRUE)")
+	finishDuration := time.Since(started)
+	s.overhead += finishDuration
+	s.runtime.recordStage("finish", finishDuration, finishErr)
+	s.span.SetAttributes(attribute.Float64("firebird.profiler.finish_ms", float64(finishDuration)/float64(time.Millisecond)))
+	var cancelErr error
 	if finishErr != nil {
-		_, _ = exec(finishCtx, s.conn, "EXECUTE PROCEDURE RDB$PROFILER.CANCEL_SESSION")
+		cancelCtx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+		started = time.Now()
+		_, cancelErr = exec(cancelCtx, s.conn, "EXECUTE PROCEDURE RDB$PROFILER.CANCEL_SESSION")
+		cancelDuration := time.Since(started)
+		cancel()
+		s.overhead += cancelDuration
+		s.runtime.recordStage("cancel", cancelDuration, cancelErr)
+		s.span.SetAttributes(attribute.Float64("firebird.profiler.cancel_ms", float64(cancelDuration)/float64(time.Millisecond)))
 		s.span.SetStatus(codes.Error, "finish_failed")
 	}
 	finishCancel()
 	var readErr error
 	if finishErr == nil {
 		readCtx, readCancel := context.WithTimeout(context.Background(), cleanupTimeout)
+		started = time.Now()
 		readErr = s.runtime.report(readCtx, s.id, s.span)
+		reportDuration := time.Since(started)
+		s.overhead += reportDuration
+		s.runtime.recordStage("report", reportDuration, readErr)
+		s.span.SetAttributes(attribute.Float64("firebird.profiler.report_ms", float64(reportDuration)/float64(time.Millisecond)))
 		readCancel()
 		if readErr != nil {
 			s.span.SetStatus(codes.Error, "read_failed")
 		}
 	}
 	deleteCtx, deleteCancel := context.WithTimeout(context.Background(), cleanupTimeout)
-	deleteErr := s.runtime.delete(deleteCtx, s.id)
+	started = time.Now()
+	acquireDuration, executeDuration, acquireErr, executeErr := s.runtime.delete(deleteCtx, s.id)
+	deleteErr := errors.Join(acquireErr, executeErr)
+	cleanupDuration := time.Since(started)
+	s.overhead += cleanupDuration
+	s.runtime.recordStage("cleanup", cleanupDuration, deleteErr)
+	s.runtime.recordStage("cleanup_acquire", acquireDuration, acquireErr)
+	if acquireErr == nil {
+		s.runtime.recordStage("cleanup_execute", executeDuration, executeErr)
+	}
+	s.span.SetAttributes(
+		attribute.Float64("firebird.profiler.cleanup_ms", float64(cleanupDuration)/float64(time.Millisecond)),
+		attribute.Float64("firebird.profiler.cleanup.acquire_ms", float64(acquireDuration)/float64(time.Millisecond)),
+		attribute.Float64("firebird.profiler.cleanup.execute_ms", float64(executeDuration)/float64(time.Millisecond)),
+		attribute.Float64("firebird.profiler.overhead_ms", float64(s.overhead)/float64(time.Millisecond)),
+	)
 	deleteCancel()
 	if deleteErr != nil {
 		s.span.SetStatus(codes.Error, "cleanup_failed")
 	} else {
 		s.span.SetAttributes(attribute.Bool("firebird.profiler.cleaned", true))
 	}
-	if err := errors.Join(finishErr, readErr, deleteErr); err != nil {
+	if err := errors.Join(finishErr, cancelErr, readErr, deleteErr); err != nil {
 		for _, stage := range []struct {
 			name string
 			err  error
-		}{{"finish", finishErr}, {"read", readErr}, {"cleanup", deleteErr}} {
+		}{{"finish", finishErr}, {"cancel", cancelErr}, {"read", readErr}, {"cleanup", deleteErr}} {
 			if stage.err == nil {
 				continue
 			}
@@ -188,7 +291,10 @@ func (s *Session) Cancel() error {
 	defer s.span.End()
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
+	started := time.Now()
 	_, err := exec(ctx, s.conn, "EXECUTE PROCEDURE RDB$PROFILER.CANCEL_SESSION")
+	s.runtime.recordStage("cancel", time.Since(started), err)
+	s.span.SetAttributes(attribute.Float64("firebird.profiler.cancel_ms", float64(time.Since(started))/float64(time.Millisecond)))
 	if err != nil {
 		s.span.SetStatus(codes.Error, "cancel_failed")
 	}
@@ -276,7 +382,16 @@ func (r *Runtime) report(ctx context.Context, id int64, span trace.Span) error {
 		if path.Valid {
 			if safe := safeAccessPath(path.String); safe != "" {
 				attrs = append(attrs, attribute.String("access_path", safe))
+				if count <= topSources && len(safe) <= 255 {
+					span.SetAttributes(attribute.String(fmt.Sprintf("firebird.profiler.top.%02d.path", count), safe))
+				}
 			}
+		}
+		if count <= topSources {
+			span.SetAttributes(
+				attribute.Float64(fmt.Sprintf("firebird.profiler.top.%02d.ms", count), float64(openNS+fetchNS)/1e6),
+				attribute.Int64(fmt.Sprintf("firebird.profiler.top.%02d.fetch_count", count), fetches),
+			)
 		}
 		span.AddEvent("firebird.profiler.record_source", trace.WithAttributes(attrs...))
 	}
@@ -304,14 +419,34 @@ func safeAccessPath(path string) string {
 	return path
 }
 
-func (r *Runtime) delete(ctx context.Context, id int64) error {
-	_, err := r.db.ExecContext(ctx, `DELETE FROM PLG$PROF_SESSIONS WHERE PROFILE_ID = ?`, id)
-	return err
+func (r *Runtime) delete(ctx context.Context, id int64) (time.Duration, time.Duration, error, error) {
+	var acquire, execute time.Duration
+	var err error
+	// An explicit sql.Conn exposes pool wait time, but unlike DB.ExecContext it
+	// does not retry driver.ErrBadConn. Retry on a fresh diagnostic connection.
+	for attempt := 0; attempt < 3; attempt++ {
+		started := time.Now()
+		conn, acquireErr := r.db.Conn(ctx)
+		acquire += time.Since(started)
+		if acquireErr != nil {
+			return acquire, execute, acquireErr, err
+		}
+		started = time.Now()
+		_, err = conn.ExecContext(ctx, `DELETE FROM PLG$PROF_SESSIONS WHERE PROFILE_ID = ?`, id)
+		execute += time.Since(started)
+		_ = conn.Close()
+		if !errors.Is(err, driver.ErrBadConn) || ctx.Err() != nil {
+			return acquire, execute, nil, err
+		}
+	}
+	return acquire, execute, nil, err
 }
 
 // CleanupStale removes only this pool's finished profiles left by an interrupted
 // export. First use of the profiler creates its tables, so an absent table is fine.
-func (r *Runtime) CleanupStale(ctx context.Context, olderThan time.Duration) error {
+func (r *Runtime) CleanupStale(ctx context.Context, olderThan time.Duration) (err error) {
+	started := time.Now()
+	defer func() { r.recordStage("stale_cleanup", time.Since(started), err) }()
 	if olderThan <= 0 {
 		return errors.New("profiler: invalid cleanup age")
 	}
@@ -322,9 +457,29 @@ func (r *Runtime) CleanupStale(ctx context.Context, olderThan time.Duration) err
 	if exists == 0 {
 		return nil
 	}
-	_, err := r.db.ExecContext(ctx, `DELETE FROM PLG$PROF_SESSIONS WHERE DESCRIPTION STARTING WITH ? AND FINISH_TIMESTAMP < ?`,
-		fmt.Sprintf("firebirdotel/%s/", r.name), time.Now().Add(-olderThan))
-	return err
+	prefix, cutoff := fmt.Sprintf("firebirdotel/%s/", r.name), time.Now().Add(-olderThan)
+	result, err := r.db.ExecContext(ctx, `DELETE FROM PLG$PROF_SESSIONS WHERE DESCRIPTION STARTING WITH ? AND FINISH_TIMESTAMP < ?`, prefix, cutoff)
+	if err == nil && r.staleRemoved != nil {
+		if count, countErr := result.RowsAffected(); countErr == nil && count > 0 {
+			r.staleRemoved.Add(context.Background(), count, metric.WithAttributes(attribute.String("pool", r.name)))
+		}
+	}
+	if err != nil {
+		return err
+	}
+	var remaining int64
+	countStarted := time.Now()
+	countErr := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM PLG$PROF_SESSIONS WHERE DESCRIPTION STARTING WITH ? AND FINISH_TIMESTAMP < ?`, prefix, cutoff).Scan(&remaining)
+	r.recordStage("stale_count", time.Since(countStarted), countErr)
+	if countErr != nil {
+		// The DELETE succeeded. Report the gauge failure separately without
+		// making a completed sweep look like a failed cleanup.
+		return nil
+	}
+	if r.staleRemaining != nil {
+		r.staleRemaining.Record(context.Background(), remaining, metric.WithAttributes(attribute.String("pool", r.name)))
+	}
+	return nil
 }
 
 var _ io.Closer = (*Runtime)(nil)
