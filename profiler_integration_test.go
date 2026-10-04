@@ -42,7 +42,7 @@ func TestProfilerUsesTraceSamplingWithoutSecondRatio(t *testing.T) {
 			counter := &countingProfiler{}
 			cfg := firebirdotel.SafeConfig()
 			cfg.TracerProvider = tp
-			cfg.ServerProfiler = counter
+			cfg.Profiler = firebirdotel.ProfilerConfig{Enabled: true, Starter: counter}
 			db, err := firebirdotel.OpenWithConfig(dsn, cfg)
 			if err != nil {
 				t.Fatal(err)
@@ -80,7 +80,7 @@ func TestSampledProfilerAutoCleansAfterSQL(t *testing.T) {
 	defer runtime.Close()
 	cfg := firebirdotel.SafeConfig()
 	cfg.TracerProvider = tp
-	cfg.ServerProfiler = runtime
+	cfg.Profiler = firebirdotel.ProfilerConfig{Enabled: true, Starter: runtime}
 	db, err := firebirdotel.OpenWithConfig(dsn, cfg)
 	if err != nil {
 		t.Fatal(err)

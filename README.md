@@ -49,7 +49,10 @@ the driver of an already-open pool.
   Use `RegisterWithConfig` only when you need overrides such as pool labels or
   specific providers. Existing `Open`/`Register` APIs retain their legacy behavior.
 - [Server diagnostics](docs/diagnostics.md): metadata, MON$, Trace and Profiler.
-  These are separate opt-in tools; ordinary instrumentation never starts them.
+  A configured server Trace collector adds plan and procedure spans. Profiling
+  requires the separate `Config.Profiler.Enabled` switch, which defaults to
+  false even when a Profiler starter is supplied. Ordinary client tracing is
+  enabled by default; the application owns the server collector lifecycle.
   [Nested server spans](docs/diagnostics.md#nested-server-spans) connect observed
   procedure, function and trigger calls to the application's client span.
 
